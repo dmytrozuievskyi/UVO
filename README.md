@@ -2,8 +2,6 @@
 
 A Blender addon that adds a suite of dynamic, real-time overlays to the UV Editor, helping you catch UV problems before they reach your textures.
 
-> Requires Blender 4.2 or newer.
-
 ---
 
 ## Overlays
@@ -67,4 +65,4 @@ Requires Blender 4.2 or newer.
 
 ## License
 
-GPL-2.0-or-later — see [LICENSE](LICENSE)
+GPL-3.0-or-later — see [LICENSE](LICENSE)
