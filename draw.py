@@ -1,0 +1,683 @@
+import bpy
+import bmesh
+import gpu
+import math
+import struct
+import traceback
+from gpu_extras.batch import batch_for_shader
+from bpy.app.handlers import persistent
+from . import utils
+from . import intersect as ix
+from . import offscreen
+from . import padding
+
+draw_handler   = None
+is_calculating = False
+
+# {obj_name: {'hash': int, 'id_batch': batch|None, 'islands': [Island]}}
+_obj_cache = {}
+
+_isect_self_cache  = {}   # per-object intersect results
+_isect_cross_cache = {}   # per-object-pair cross-object intersect results
+
+_intersect_batches = {'hatch': None, 'checker': None}
+
+_inter_island_tris = []   # tris fed to offscreen.render() each frame
+
+# gray = 1/(n+1), threshold = gray*1.5 — any pixel covered by 2+ islands → red fill.
+_inter_gray      = 0.5
+_inter_threshold = 0.6
+
+_shader = None
+
+# Sentinel: pre-pass failed for this object — use n=1 fallback, keeping
+# palette offsets consistent with what the pre-pass recorded.
+_PREPASS_FAILED = object()
+
+_DEBOUNCE_DELAY = 0.5   # seconds; rebuild fires once the user stops editing
+_debounce_fn    = None
+
+
+def _schedule_debounce():
+    global _debounce_fn
+    _cancel_debounce()
+
+    def _fire():
+        global _debounce_fn
+        _debounce_fn = None
+        if not is_calculating:
+            update_batches_safe(bpy.context)
+            try:
+                for window in bpy.context.window_manager.windows:
+                    for area in window.screen.areas:
+                        if area.type == 'IMAGE_EDITOR':
+                            area.tag_redraw()
+            except Exception:
+                pass
+        return None  # unregister
+
+    _debounce_fn = _fire
+    bpy.app.timers.register(_fire, first_interval=_DEBOUNCE_DELAY)
+
+
+def _cancel_debounce():
+    global _debounce_fn
+    if _debounce_fn is not None:
+        try:
+            bpy.app.timers.unregister(_debounce_fn)
+        except Exception:
+            pass
+        _debounce_fn = None
+
+
+def full_refresh(context):
+    """Clear all caches and rebuild. Call when settings change (opacity, mode, etc.)."""
+    _obj_cache.clear()
+    _isect_self_cache.clear()
+    _isect_cross_cache.clear()
+    update_batches_safe(context)
+    props = context.scene.uv_id_props
+    if props.show_padding and not props.is_muted:
+        _rebuild_padding_batches(props)
+    try:
+        for area in context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                area.tag_redraw()
+    except Exception:
+        pass
+
+
+def _get_shader():
+    global _shader
+    if _shader is None:
+        _shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+    return _shader
+
+
+def _uv_hash(bm, uv_layer):
+    # Polynomial rolling hash — order-sensitive so a rotated island hashes differently.
+    _pack = struct.pack
+    h = 0
+    for face in bm.faces:
+        for loop in face.loops:
+            uv = loop[uv_layer].uv
+            h = (h * 1000003 ^ hash(_pack('2f', uv.x, uv.y))) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def _mesh_connected_groups(bm):
+    """Group faces by 3D edge connectivity, ignoring UV seams."""
+    visited = set()
+    groups  = []
+    for seed in bm.faces:
+        if seed.index in visited:
+            continue
+        group = set()
+        stack = [seed]
+        visited.add(seed.index)
+        group.add(seed.index)
+        while stack:
+            curr = stack.pop()
+            for edge in curr.edges:
+                for lf in edge.link_faces:
+                    if lf.index not in visited:
+                        visited.add(lf.index)
+                        group.add(lf.index)
+                        stack.append(lf)
+        groups.append(group)
+    return groups
+
+
+def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
+                    obj_index=0, total_objs=1,
+                    group_offset=0, total_global_groups=1,
+                    precomputed_groups=None):
+    # Re-check mode — it can change between depsgraph event and this call.
+    if obj.mode != 'EDIT':
+        return None, None, None
+    try:
+        bm_live = bmesh.from_edit_mesh(obj.data)
+        bm_copy = bm_live.copy()
+    except Exception:
+        return None, None, None
+
+    current_hash = None
+    try:
+        bm_copy.faces.ensure_lookup_table()
+        if len(bm_copy.faces) == 0:
+            return None, None, None
+
+        uv_layer     = bm_copy.loops.layers.uv.verify()
+        current_hash = _uv_hash(bm_copy, uv_layer)
+
+        cached = _obj_cache.get(obj.name)
+        if cached and cached['hash'] == current_hash:
+            utils.log("id_cache", f"{obj.name}: hit (hash={current_hash})")
+            return current_hash, None, None
+
+        obj_seed = utils.get_string_hash(obj.name)
+        islands  = ix.extract_islands(
+            bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name
+        )
+        utils.log("id_extract", (
+            f"{obj.name}: {len(islands)} islands, "
+            f"{sum(len(i.tris) for i in islands)} tris, "
+            f"{sum(len(i.boundary_segs) for i in islands)} boundary_segs"
+        ))
+
+        coords, colors = [], []
+        shader = _get_shader()
+
+        if uv_id_mode == 'OBJECT':
+            obj_col = utils.get_distinct_color(
+                obj_index, total_objs, seed_offset=0.0, alpha=uv_id_alpha
+            )
+            for isle in islands:
+                for tri in isle.tris:
+                    for v in tri:
+                        coords.append((v[0], v[1], 0.0))
+                        colors.append(obj_col)
+        else:
+            # CONNECTED: one colour per 3D-connected piece, global palette so
+            # all objects share maximally separated hues.
+            if precomputed_groups is _PREPASS_FAILED:
+                topo_groups = [set(f.index for f in bm_copy.faces)]
+            elif precomputed_groups is not None:
+                topo_groups = precomputed_groups
+            else:
+                topo_groups = _mesh_connected_groups(bm_copy)
+            utils.log("connected", (
+                f"{obj.name}: {len(topo_groups)} 3D-connected groups "
+                f"from {len(bm_copy.faces)} faces "
+                f"(global offset {group_offset}/{total_global_groups})"
+            ))
+            face_color = {}
+            for gi, group in enumerate(topo_groups):
+                col = utils.get_distinct_color(
+                    group_offset + gi, total_global_groups,
+                    seed_offset=0.0, alpha=uv_id_alpha
+                )
+                for fi in group:
+                    face_color[fi] = col
+
+            for face in bm_copy.faces:
+                col = face_color.get(face.index)
+                if col is None:
+                    continue
+                loops = face.loops
+                if len(loops) < 3:
+                    continue
+                uv0 = loops[0][uv_layer].uv
+                p0  = (uv0.x, uv0.y, 0.0)
+                for i in range(1, len(loops) - 1):
+                    uv1 = loops[i][uv_layer].uv
+                    uv2 = loops[i + 1][uv_layer].uv
+                    coords += [p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)]
+                    colors += [col, col, col]
+
+        id_batch = (
+            batch_for_shader(shader, 'TRIS', {"pos": coords, "color": colors})
+            if coords else None
+        )
+        return current_hash, id_batch, islands
+
+    except Exception as e:
+        utils.log("build", f"error ({obj.name}): {e}")
+        traceback.print_exc()
+        return current_hash, None, None
+    finally:
+        if bm_copy:
+            bm_copy.free()
+
+
+def _rebuild_intersect_batches(props):
+    global _inter_island_tris
+
+    shader   = _get_shader()
+    opacity  = props.intersect_opacity
+    tiled    = (props.intersect_uv_mode == 'TILED')
+
+    all_islands_flat = [
+        isle
+        for cache in _obj_cache.values()
+        if cache.get('islands')
+        for isle in cache['islands']
+    ]
+
+    global_inter       = set()
+    global_stack       = set()
+    global_inter_pairs = set()   # (flat_fi_a, flat_fi_b) for offscreen tile logic
+
+    obj_names    = list(_obj_cache.keys())
+    n_objs       = len(obj_names)
+    base_indices = {}
+    idx = 0
+    for name, cache in _obj_cache.items():
+        base_indices[name] = idx
+        idx += len(cache.get('islands') or [])
+
+    for name in obj_names:
+        cache    = _obj_cache[name]
+        islands  = cache.get('islands') or []
+        cur_hash = cache.get('hash')
+        prev     = _isect_self_cache.get(name)
+        if prev and prev['uv_hash'] == cur_hash:
+            entry = prev
+        else:
+            p           = prev or {}
+            det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
+            inter_idx, stack_idx, uv_kh, i_pairs = ix.classify_islands(
+                det_islands,
+                prev_inter_idx    = p.get('inter_idx'),
+                prev_stack_idx    = p.get('stack_idx'),
+                prev_uv_key_hash  = p.get('uv_key_hash'),
+                prev_inter_pairs  = p.get('inter_pairs'),
+            )
+            entry = {'uv_hash': cur_hash, 'inter_idx': inter_idx,
+                     'stack_idx': stack_idx,
+                     'uv_key_hash': uv_kh, 'inter_pairs': i_pairs}
+            _isect_self_cache[name] = entry
+        base = base_indices[name]
+        for li in entry['inter_idx']:
+            global_inter.add(base + li)
+        for li in entry['stack_idx']:
+            global_stack.add(base + li)
+        for la, lb in entry.get('inter_pairs') or ():
+            fa, fb = base + la, base + lb
+            global_inter_pairs.add((fa, fb) if fa < fb else (fb, fa))
+
+    active_pairs = set()
+    for i in range(n_objs):
+        for j in range(i + 1, n_objs):
+            na, nb   = obj_names[i], obj_names[j]
+            pair_key = (na, nb) if na <= nb else (nb, na)
+            active_pairs.add(pair_key)
+
+            ca, cb = _obj_cache[na], _obj_cache[nb]
+            ia, ib = ca.get('islands') or [], cb.get('islands') or []
+            ha, hb = ca.get('hash'), cb.get('hash')
+
+            prev = _isect_cross_cache.get(pair_key)
+            if prev and prev['ha'] == ha and prev['hb'] == hb:
+                entry = prev
+            else:
+                p      = prev or {}
+                det_ia = [ix.normalize_island(i) for i in ia] if tiled else ia
+                det_ib = [ix.normalize_island(i) for i in ib] if tiled else ib
+                r_a, r_b, s_a, s_b, uv_h, i_pairs = ix.classify_islands_cross(
+                    det_ia, det_ib,
+                    prev_inter_a      = p.get('inter_a'),
+                    prev_inter_b      = p.get('inter_b'),
+                    prev_stack_a      = p.get('stack_a'),
+                    prev_stack_b      = p.get('stack_b'),
+                    prev_uv_hash      = p.get('uv_hash'),
+                    prev_inter_pairs  = p.get('inter_pairs'),
+                )
+                entry = {'ha': ha, 'hb': hb,
+                         'inter_a': r_a, 'inter_b': r_b,
+                         'stack_a': s_a, 'stack_b': s_b,
+                         'uv_hash': uv_h, 'inter_pairs': i_pairs}
+                _isect_cross_cache[pair_key] = entry
+
+            base_a = base_indices[na]
+            base_b = base_indices[nb]
+            for li in entry['inter_a']:
+                global_inter.add(base_a + li)
+            for li in entry['inter_b']:
+                global_inter.add(base_b + li)
+            for li in entry.get('stack_a', ()):
+                global_stack.add(base_a + li)
+            for li in entry.get('stack_b', ()):
+                global_stack.add(base_b + li)
+            for la, lb in entry.get('inter_pairs') or ():
+                fa, fb = base_a + la, base_b + lb
+                global_inter_pairs.add((fa, fb) if fa < fb else (fb, fa))
+
+    for name in list(_isect_self_cache):
+        if name not in _obj_cache:
+            del _isect_self_cache[name]
+    for pk in list(_isect_cross_cache):
+        if pk not in active_pairs:
+            del _isect_cross_cache[pk]
+
+    # Tile-crossing islands straddle a UDIM boundary — flag as errors, hatch + red fill.
+    tile_crossing_flat = set()
+    if tiled:
+        for name, cache in _obj_cache.items():
+            islands = cache.get('islands') or []
+            base    = base_indices[name]
+            for li in ix.find_tile_crossing_islands(islands):
+                fi = base + li
+                global_inter.add(fi)
+                tile_crossing_flat.add(fi)
+        utils.log("rebuild", f"tile_crossing={len(tile_crossing_flat)}")
+
+    hatch_coords, hatch_colors     = [], []
+    checker_coords, checker_colors = [], []
+    checker_col = (1.0, 1.0, 1.0, opacity)
+
+    for fi, isle in enumerate(all_islands_flat):
+        if fi in global_inter:
+            r, g, b, _ = isle.color
+            hc = (r, g, b, opacity)
+            for p1, p2 in ix.generate_hatch(isle.tris):
+                hatch_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
+                hatch_colors  += [hc, hc]
+        if fi in global_stack:
+            for p1, p2 in ix.generate_cross_hatch(isle.tris):
+                checker_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
+                checker_colors  += [checker_col, checker_col]
+
+    def _make(prim, coords, colors):
+        if not coords:
+            return None
+        return batch_for_shader(shader, prim, {"pos": coords, "color": colors})
+
+    _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
+    _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
+
+    # Offscreen red-fill tris — tiled mode rules:
+    #   Tile-crossing touching tile 0 → raw tris ×2 (guaranteed red fill in place)
+    #   Pair with one island in tile 0 → both normalized to tile 0
+    #   Pair both in tile 1+ → hatch only, no red fill
+    #   UDIM mode → all inter islands, uv_key dedup to avoid double-drawing stacked pairs
+
+    def _island_in_tile0(isle):
+        cx = (isle.aabb[0] + isle.aabb[2]) * 0.5
+        cy = (isle.aabb[1] + isle.aabb[3]) * 0.5
+        return (max(0, math.floor(cx)) == 0 and max(0, math.floor(cy)) == 0)
+
+    seen_norm_keys = set()
+    inter_tris_raw = []
+    n_unique       = 0   # unique contributors (tile-crossing counts as 1 each)
+
+    if tiled:
+        for fi in tile_crossing_flat:
+            isle = all_islands_flat[fi]
+            mn_u, mn_v, mx_u, mx_v = isle.aabb
+            touches_tile0 = (mn_u < 1.0 - ix.UV_EPS and mx_u > ix.UV_EPS and
+                             mn_v < 1.0 - ix.UV_EPS and mx_v > ix.UV_EPS)
+            if touches_tile0:
+                # Twice → 2*gray → guaranteed red fill.
+                inter_tris_raw.append(isle.tris)
+                inter_tris_raw.append(isle.tris)
+                n_unique += 1
+
+        for fi_a, fi_b in global_inter_pairs:
+            if fi_a in tile_crossing_flat or fi_b in tile_crossing_flat:
+                continue   # tile-crossing already handled above
+            isle_a = all_islands_flat[fi_a]
+            isle_b = all_islands_flat[fi_b]
+            if not _island_in_tile0(isle_a) and not _island_in_tile0(isle_b):
+                continue   # both in tile 1+: hatch only
+            norm_a = ix.normalize_island(isle_a)
+            norm_b = ix.normalize_island(isle_b)
+            for norm in (norm_a, norm_b):
+                key = norm.uv_key
+                if key is not None:
+                    if key in seen_norm_keys:
+                        continue
+                    seen_norm_keys.add(key)
+                inter_tris_raw.append(norm.tris)
+                n_unique += 1
+    else:
+        for fi, isle in enumerate(all_islands_flat):
+            if fi not in global_inter:
+                continue
+            key = isle.uv_key
+            if key is not None:
+                if key in seen_norm_keys:
+                    continue
+                seen_norm_keys.add(key)
+            inter_tris_raw.append(isle.tris)
+            n_unique += 1
+
+    global _inter_gray, _inter_threshold
+    _inter_gray      = 1.0 / (n_unique + 1) if n_unique > 0 else 0.5
+    _inter_threshold = _inter_gray * 1.5
+
+    _inter_island_tris = [tri for tris in inter_tris_raw for tri in tris]
+    offscreen.mark_dirty()
+    utils.log("rebuild", f"inter_tris={len(_inter_island_tris)}, "
+          f"hatch_segs={len(hatch_coords)//2}, stack={len(global_stack)}")
+
+
+def _rebuild_padding_batches(props):
+    padding.rebuild(props, _obj_cache)
+
+
+def update_batches_safe(context):
+    global is_calculating, _obj_cache
+
+    if is_calculating:
+        return
+    is_calculating = True
+
+    try:
+        props        = context.scene.uv_id_props
+        uv_id_mode   = props.overlay_mode
+        uv_id_alpha  = props.opacity
+        any_changed  = False
+        active_names = set()
+
+        # Sort so colour assignment divides the hue wheel by global total first.
+        edit_objs = sorted(
+            [o for o in context.scene.objects
+             if o.type == 'MESH' and o.mode == 'EDIT'],
+            key=lambda o: o.name
+        )
+        total_objs = len(edit_objs)
+
+        # Pre-count connected groups across all objects so the global palette
+        # gives maximally separated hues across every edit-mode object.
+        group_offsets       = {}
+        precomp_groups      = {}
+        total_global_groups = 0
+        if uv_id_mode == 'CONNECTED':
+            for obj in edit_objs:
+                try:
+                    bm_live = bmesh.from_edit_mesh(obj.data)
+                    # Read-only — safe on bm_live directly, no copy needed.
+                    groups = _mesh_connected_groups(bm_live)
+                    precomp_groups[obj.name] = groups
+                    n = len(groups)
+                except Exception:
+                    precomp_groups[obj.name] = _PREPASS_FAILED
+                    n = 1
+                group_offsets[obj.name] = total_global_groups
+                total_global_groups    += n
+            total_global_groups = max(total_global_groups, 1)
+
+        for obj_index, obj in enumerate(edit_objs):
+            active_names.add(obj.name)
+
+            new_hash, new_id_batch, new_islands = _build_obj_data(
+                obj, uv_id_mode, uv_id_alpha, obj_index, total_objs,
+                group_offset=group_offsets.get(obj.name, 0),
+                total_global_groups=total_global_groups,
+                precomputed_groups=precomp_groups.get(obj.name),
+            )
+
+            if new_islands is not None:
+                _obj_cache[obj.name] = {
+                    'hash':     new_hash,
+                    'id_batch': new_id_batch,
+                    'islands':  new_islands,
+                }
+                _isect_self_cache.pop(obj.name, None)
+                for pk in list(_isect_cross_cache):
+                    if obj.name in pk:
+                        del _isect_cross_cache[pk]
+                any_changed = True
+            elif new_hash is not None and obj.name not in _obj_cache:
+                any_changed = True
+
+        for name in list(_obj_cache):
+            if name not in active_names:
+                del _obj_cache[name]
+                _isect_self_cache.pop(name, None)
+                for pk in list(_isect_cross_cache):
+                    if name in pk:
+                        del _isect_cross_cache[pk]
+                any_changed = True
+
+        if any_changed and props.show_intersect and not props.is_muted:
+            _rebuild_intersect_batches(props)
+
+        if any_changed and props.show_padding and not props.is_muted:
+            _rebuild_padding_batches(props)
+
+    except Exception as e:
+        utils.log("update", f"error: {e}")
+    finally:
+        is_calculating = False
+
+
+@persistent
+def depsgraph_update_handler(scene, depsgraph):
+    prop = getattr(scene, "uv_id_props", None)
+    if not prop or prop.is_muted:
+        return
+    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding:
+        return
+
+    if bpy.context.mode != 'EDIT_MESH':
+        if _obj_cache:
+            _obj_cache.clear()
+            _isect_self_cache.clear()
+            _isect_cross_cache.clear()
+            _intersect_batches['hatch']   = None
+            _intersect_batches['checker'] = None
+            padding.clear()
+        # Clear tris and mark dirty so the red fill disappears on leaving edit mode.
+        global _inter_island_tris
+        _inter_island_tris = []
+        offscreen.mark_dirty()
+        _cancel_debounce()
+        try:
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'IMAGE_EDITOR':
+                        area.tag_redraw()
+        except Exception:
+            pass
+        return
+
+    if not any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
+               for u in depsgraph.updates):
+        return
+
+    def _do_rebuild():
+        if not is_calculating:
+            update_batches_safe(bpy.context)
+            try:
+                for window in bpy.context.window_manager.windows:
+                    for area in window.screen.areas:
+                        if area.type == 'IMAGE_EDITOR':
+                            area.tag_redraw()
+            except Exception:
+                pass
+
+    if prop.live_update:
+        _do_rebuild()
+    else:
+        # Empty cache means we just entered edit mode — rebuild immediately
+        # rather than waiting for the debounce delay.
+        if not _obj_cache:
+            _do_rebuild()
+        else:
+            _schedule_debounce()
+
+
+def draw_callback():
+
+    space = bpy.context.space_data
+    if space and hasattr(space, 'overlay') and not space.overlay.show_overlays:
+        return
+
+    props = bpy.context.scene.uv_id_props
+    if props.is_muted:
+        return
+
+    shader = _get_shader()
+
+    try:
+        gpu.state.blend_set('ALPHA')
+        gpu.state.depth_test_set('NONE')
+        shader.bind()
+
+        # ── Pass 1: UV ID color fill ──────────────────────────────────────────
+        if props.show_uv_id:
+            for cache in _obj_cache.values():
+                b = cache.get('id_batch')
+                if b:
+                    b.draw(shader)
+
+        if props.show_intersect:
+            # ── Pass 2: hatch on intersecting islands ─────────────────────────
+            gpu.state.line_width_set(2.0)
+            if _intersect_batches['hatch']:
+                _intersect_batches['hatch'].draw(shader)
+
+            # ── Pass 3: cross-hatch on stacked islands ────────────────────────
+            if _intersect_batches['checker']:
+                _intersect_batches['checker'].draw(shader)
+
+            # ── Pass 4: offscreen overlap fill ────────────────────────────────
+            if _inter_island_tris:
+                utils.log("pass4", f"tris={len(_inter_island_tris)}")
+                if offscreen.check_view_matrix():
+                    offscreen.mark_dirty()
+                offscreen.render(_inter_island_tris, shader, _inter_gray)
+                offscreen.composite(props.intersect_opacity, _inter_threshold)
+                shader.bind()  # restore after offscreen composite
+
+        # ── Pass 5: padding outlines ──────────────────────────────────────────
+        if props.show_padding:
+            if padding.batches['ok']:
+                padding.batches['ok'].draw(shader)
+            if padding.batches['bad']:
+                padding.batches['bad'].draw(shader)
+
+    except Exception as e:
+        utils.log("draw", f"error: {e}")
+        traceback.print_exc()
+    finally:
+        # Restore GPU state — exceptions here would corrupt Blender's own rendering.
+        gpu.state.blend_set('NONE')
+        gpu.state.depth_test_set('LESS_EQUAL')
+        gpu.state.line_width_set(1.0)
+
+
+def register():
+    if depsgraph_update_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_handler)
+    bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_handler)
+
+
+def unregister():
+    global draw_handler, _shader
+    global _inter_island_tris, _inter_gray, _inter_threshold
+
+    if draw_handler:
+        bpy.types.SpaceImageEditor.draw_handler_remove(draw_handler, 'WINDOW')
+        draw_handler = None
+
+    if depsgraph_update_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_handler)
+
+    _cancel_debounce()
+
+    offscreen.free()
+    padding.clear()
+
+    _obj_cache.clear()
+    _isect_self_cache.clear()
+    _isect_cross_cache.clear()
+    _intersect_batches['hatch']   = None
+    _intersect_batches['checker'] = None
+    _inter_island_tris = []
+    _inter_gray        = 0.5
+    _inter_threshold   = 0.6
+    _shader            = None
+    utils.log_clear()
