@@ -1,19 +1,16 @@
 schema_version = "1.0.0"
+
 id = "uvo_overlays"
-name = "UVO"
 version = "1.0.0"
+
+name = "UVO"
 tagline = "Dynamic overlays for the UV Editor"
 maintainer = "Dmytro Zuievskyi"
+
+type = "add-on"
+tags = ["UV", "Modeling"]
 blender_version_min = "4.2.0"
 
-description = """Enhance your UV workflow with a suite of dynamic overlays.
+license = ["SPDX:GPL-3.0-or-later"]
 
-• ID Overlay: Instantly assign distinct, stable colors to each object or mesh component, with Object and Island color modes.
-• Intersect Overlay: Clearly highlight overlapping and stacked islands in real-time, checking within objects and across all objects in Edit Mode. Supports both Tiled and UDIM workflows.
-• Padding Overlay: Visualize per-island padding zones and instantly spot islands whose padding areas overlap, helping you catch potential mipmap bleed before it becomes a problem."""
-
-website = "https://placeholder-link.com/uvo"
-
-license = ["SPDX:GPL-2.0-or-later"]
-tags = ["UV", "Modeling"]
-type = "add-on"
+website = "https://github.com/dmytrozuievskyi/UVO"
