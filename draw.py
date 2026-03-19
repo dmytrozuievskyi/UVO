@@ -140,18 +140,18 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     precomputed_groups=None):
     # Re-check mode — it can change between depsgraph event and this call.
     if obj.mode != 'EDIT':
-        return None, None, None
+        return None, None, None, None, None
     try:
         bm_live = bmesh.from_edit_mesh(obj.data)
         bm_copy = bm_live.copy()
     except Exception:
-        return None, None, None
+        return None, None, None, None, None
 
     current_hash = None
     try:
         bm_copy.faces.ensure_lookup_table()
         if len(bm_copy.faces) == 0:
-            return None, None, None
+            return None, None, None, None, None
 
         uv_layer     = bm_copy.loops.layers.uv.verify()
         current_hash = _uv_hash(bm_copy, uv_layer)
@@ -159,7 +159,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
         cached = _obj_cache.get(obj.name)
         if cached and cached['hash'] == current_hash:
             utils.log("id_cache", f"{obj.name}: hit (hash={current_hash})")
-            return current_hash, None, None
+            return current_hash, None, None, None, None
 
         obj_seed = utils.get_string_hash(obj.name)
         islands  = ix.extract_islands(
@@ -225,12 +225,12 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
             batch_for_shader(shader, 'TRIS', {"pos": coords, "color": colors})
             if coords else None
         )
-        return current_hash, id_batch, islands
+        return current_hash, id_batch, islands, list(coords), list(colors)
 
     except Exception as e:
         utils.log("build", f"error ({obj.name}): {e}")
         traceback.print_exc()
-        return current_hash, None, None
+        return current_hash, None, None, None, None
     finally:
         if bm_copy:
             bm_copy.free()
@@ -484,6 +484,110 @@ def _rebuild_intersect_batches(props):
           f"cache hits={_hits} miss={_miss}")
 
 
+def _rebuild_id_opacity(props):
+    """Swap alpha in cached ID batch geometry — no reclassification or island re-extraction."""
+    alpha  = props.opacity
+    shader = _get_shader()
+    for cache in _obj_cache.values():
+        coords = cache.get('id_coords')
+        rgba   = cache.get('id_rgba')
+        if not coords or not rgba:
+            cache['id_batch'] = None
+            continue
+        colors = [(r, g, b, alpha) for r, g, b, _ in rgba]
+        cache['id_batch'] = batch_for_shader(
+            shader, 'TRIS', {"pos": coords, "color": colors}
+        )
+
+
+def _rebuild_intersect_opacity(props):
+    """Rebuild hatch/checker batches with new opacity — reuses cached classification and hatch geometry.
+
+    Does NOT re-run classify_islands / classify_islands_cross.
+    """
+    if not _obj_cache:
+        return
+
+    opacity     = props.intersect_opacity
+    shader      = _get_shader()
+    checker_col = (1.0, 1.0, 1.0, opacity)
+
+    # Reconstruct flat island list and base indices (same logic as _rebuild_intersect_batches).
+    all_islands_flat = [
+        isle
+        for cache in _obj_cache.values()
+        if cache.get('islands')
+        for isle in cache['islands']
+    ]
+
+    obj_names    = list(_obj_cache.keys())
+    base_indices = {}
+    idx = 0
+    for name, cache in _obj_cache.items():
+        base_indices[name] = idx
+        idx += len(cache.get('islands') or [])
+
+    # Pull global_inter / global_stack straight from the existing classify caches.
+    global_inter = set()
+    global_stack = set()
+
+    for name in obj_names:
+        entry = _isect_self_cache.get(name)
+        if not entry:
+            continue
+        base = base_indices[name]
+        for li in entry.get('inter_idx', ()):
+            global_inter.add(base + li)
+        for li in entry.get('stack_idx', ()):
+            global_stack.add(base + li)
+
+    for pair_key, entry in _isect_cross_cache.items():
+        na, nb = pair_key
+        if na not in base_indices or nb not in base_indices:
+            continue
+        base_a = base_indices[na]
+        base_b = base_indices[nb]
+        for li in entry.get('inter_a', ()):
+            global_inter.add(base_a + li)
+        for li in entry.get('inter_b', ()):
+            global_inter.add(base_b + li)
+        for li in entry.get('stack_a', ()):
+            global_stack.add(base_a + li)
+        for li in entry.get('stack_b', ()):
+            global_stack.add(base_b + li)
+
+    hatch_coords,   hatch_colors   = [], []
+    checker_coords, checker_colors = [], []
+
+    for fi, isle in enumerate(all_islands_flat):
+        key = isle.uv_key
+        if fi in global_inter:
+            r, g, b, _ = isle.color
+            hc   = (r, g, b, opacity)
+            segs = _hatch_seg_cache.get(key) if key else None
+            if segs is None:
+                segs = ix.generate_hatch(isle.tris)
+                if key:
+                    _hatch_seg_cache[key] = segs
+            for p1, p2 in segs:
+                hatch_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
+                hatch_colors  += [hc, hc]
+        if fi in global_stack:
+            cross = _cross_hatch_seg_cache.get(key) if key else None
+            if cross is None:
+                cross = ix.generate_cross_hatch(isle.tris)
+                if key:
+                    _cross_hatch_seg_cache[key] = cross
+            for p1, p2 in cross:
+                checker_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
+                checker_colors  += [checker_col, checker_col]
+
+    def _make(prim, coords, colors):
+        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else None
+
+    _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
+    _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
+
 def _rebuild_padding_batches(props):
     padding.rebuild(props, _obj_cache)
 
@@ -534,7 +638,7 @@ def update_batches_safe(context):
         for obj_index, obj in enumerate(edit_objs):
             active_names.add(obj.name)
 
-            new_hash, new_id_batch, new_islands = _build_obj_data(
+            new_hash, new_id_batch, new_islands, new_id_coords, new_id_rgba = _build_obj_data(
                 obj, uv_id_mode, uv_id_alpha, obj_index, total_objs,
                 group_offset=group_offsets.get(obj.name, 0),
                 total_global_groups=total_global_groups,
@@ -543,9 +647,11 @@ def update_batches_safe(context):
 
             if new_islands is not None:
                 _obj_cache[obj.name] = {
-                    'hash':     new_hash,
-                    'id_batch': new_id_batch,
-                    'islands':  new_islands,
+                    'hash':      new_hash,
+                    'id_batch':  new_id_batch,
+                    'islands':   new_islands,
+                    'id_coords': new_id_coords,   # raw (x,y,z) list — used by _rebuild_id_opacity
+                    'id_rgba':   new_id_rgba,     # raw (r,g,b,a) list — alpha swapped on opacity change
                 }
                 _isect_self_cache.pop(obj.name, None)
                 for pk in list(_isect_cross_cache):

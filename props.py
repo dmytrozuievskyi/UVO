@@ -47,10 +47,32 @@ def update_mute(self, context):
 
 
 def update_uv_id(self, context):
-    # Mode or opacity changed — full rebuild needed.
+    # Mode changed — full rebuild needed to reassign colours.
     from . import draw
     draw.full_refresh(context)
     _sync_draw(context)
+
+
+def update_uv_id_opacity(self, context):
+    """Opacity only — swap alpha in cached batches, no reclassification."""
+    from . import draw
+    if not self.is_muted and self.show_uv_id:
+        draw._rebuild_id_opacity(self)
+    if context.screen:
+        for area in context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                area.tag_redraw()
+
+
+def update_intersect_opacity(self, context):
+    """Intersect opacity only — recolour cached hatch geometry, no reclassification."""
+    from . import draw
+    if not self.is_muted and self.show_intersect:
+        draw._rebuild_intersect_opacity(self)
+    if context.screen:
+        for area in context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                area.tag_redraw()
 
 
 def update_show_uv_id(self, context):
@@ -128,7 +150,7 @@ class UVIDProperties(bpy.types.PropertyGroup):
         name="Opacity",
         subtype='FACTOR',
         description="UV ID overlay transparency",
-        update=update_uv_id,
+        update=update_uv_id_opacity,
     )
     overlay_mode: bpy.props.EnumProperty(
         name="Mode",
@@ -152,7 +174,7 @@ class UVIDProperties(bpy.types.PropertyGroup):
         name="Opacity",
         subtype='FACTOR',
         description="Intersect overlay opacity",
-        update=update_intersect_settings,
+        update=update_intersect_opacity,
     )
     intersect_uv_mode: bpy.props.EnumProperty(
         name="UV Mode",
