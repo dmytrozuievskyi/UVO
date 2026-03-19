@@ -3,6 +3,7 @@ import bmesh
 import gpu
 import math
 import struct
+import time
 import traceback
 from gpu_extras.batch import batch_for_shader
 from bpy.app.handlers import persistent
@@ -233,6 +234,8 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 def _rebuild_intersect_batches(props):
     global _inter_island_tris
 
+    _t0 = time.perf_counter()
+
     shader   = _get_shader()
     opacity  = props.intersect_opacity
     tiled    = (props.intersect_uv_mode == 'TILED')
@@ -440,6 +443,8 @@ def _rebuild_intersect_batches(props):
     offscreen.mark_dirty()
     utils.log("rebuild", f"inter_tris={len(_inter_island_tris)}, "
           f"hatch_segs={len(hatch_coords)//2}, stack={len(global_stack)}")
+    utils.log("timing", f"intersect_rebuild={1000*(time.perf_counter()-_t0):.1f}ms  "
+          f"hatch_segs={len(hatch_coords)//2}  offscreen_tris={len(_inter_island_tris)}")
 
 
 def _rebuild_padding_batches(props):
@@ -452,6 +457,7 @@ def update_batches_safe(context):
     if is_calculating:
         return
     is_calculating = True
+    _t0 = time.perf_counter()
 
     try:
         props        = context.scene.uv_id_props
@@ -531,6 +537,7 @@ def update_batches_safe(context):
         utils.log("update", f"error: {e}")
     finally:
         is_calculating = False
+        utils.log("timing", f"update_batches={1000*(time.perf_counter()-_t0):.1f}ms")
 
 
 @persistent
@@ -623,8 +630,8 @@ def draw_callback():
             if _intersect_batches['checker']:
                 _intersect_batches['checker'].draw(shader)
 
-            # ── Pass 4: offscreen overlap fill ────────────────────────────────
-            if _inter_island_tris:
+            # ── Pass 4: offscreen overlap fill (requires Complex Intersection pref) ──
+            if _inter_island_tris and utils.complex_highlight_enabled():
                 utils.log("pass4", f"tris={len(_inter_island_tris)}")
                 if offscreen.check_view_matrix():
                     offscreen.mark_dirty()

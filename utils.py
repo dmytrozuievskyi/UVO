@@ -47,6 +47,14 @@ def _debug_enabled() -> bool:
     return getattr(prefs.preferences, 'debug', False)
 
 
+def complex_highlight_enabled() -> bool:
+    """Return True when the offscreen red-fill pass is enabled in addon preferences."""
+    prefs = bpy.context.preferences.addons.get(__package__)
+    if prefs is None:
+        return False
+    return getattr(prefs.preferences, 'complex_intersection', False)
+
+
 def log(key: str, msg: str) -> None:
     """Print [UVO] <key>: <msg> only when debug is on AND msg changed."""
     if not _debug_enabled():

@@ -28,6 +28,14 @@ preview_collections = {}
 class UVOAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
+    complex_intersection: bpy.props.BoolProperty(
+        name="Complex Intersection Highlight",
+        description=(
+            "Show a red fill over overlapping UV areas using an offscreen GPU buffer. "
+        ),
+        default=False,
+    )
+
     debug: bpy.props.BoolProperty(
         name="Debug Logging",
         description=(
@@ -37,6 +45,7 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
     )
 
     def draw(self, context):
+        self.layout.prop(self, "complex_intersection")
         self.layout.prop(self, "debug")
 
 
