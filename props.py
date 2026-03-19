@@ -223,10 +223,20 @@ class UVIDProperties(bpy.types.PropertyGroup):
 
 
 def register():
+    try:
+        bpy.utils.unregister_class(UVIDProperties)
+    except RuntimeError:
+        pass
     bpy.utils.register_class(UVIDProperties)
     bpy.types.Scene.uv_id_props = bpy.props.PointerProperty(type=UVIDProperties)
 
 
 def unregister():
-    del bpy.types.Scene.uv_id_props
-    bpy.utils.unregister_class(UVIDProperties)
+    try:
+        del bpy.types.Scene.uv_id_props
+    except AttributeError:
+        pass
+    try:
+        bpy.utils.unregister_class(UVIDProperties)
+    except RuntimeError:
+        pass

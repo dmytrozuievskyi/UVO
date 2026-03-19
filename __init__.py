@@ -50,6 +50,10 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
 
 
 def register():
+    try:
+        bpy.utils.unregister_class(UVOAddonPreferences)
+    except RuntimeError:
+        pass
     bpy.utils.register_class(UVOAddonPreferences)
     # Icons must load before UI registers — falls back to 'GROUP_UVS' if missing.
     pcoll = bpy.utils.previews.new()
