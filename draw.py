@@ -23,6 +23,9 @@ _isect_cross_cache = {}   # per-object-pair cross-object intersect results
 
 _intersect_batches = {'hatch': None, 'checker': None}
 
+_hatch_seg_cache       = {}   # for global_inter
+_cross_hatch_seg_cache = {}   # for global_stack
+
 _inter_island_tris = []   # tris fed to offscreen.render() each frame
 
 # gray = 1/(n+1), threshold = gray*1.5 — any pixel covered by 2+ islands → red fill.
@@ -76,6 +79,8 @@ def full_refresh(context):
     _obj_cache.clear()
     _isect_self_cache.clear()
     _isect_cross_cache.clear()
+    _hatch_seg_cache.clear()
+    _cross_hatch_seg_cache.clear()
     update_batches_safe(context)
     props = context.scene.uv_id_props
     if props.show_padding and not props.is_muted:
@@ -359,17 +364,48 @@ def _rebuild_intersect_batches(props):
     checker_coords, checker_colors = [], []
     checker_col = (1.0, 1.0, 1.0, opacity)
 
+    _hits = 0
+    _miss = 0
+
+    # Collect all uv_keys present this rebuild for cache eviction at the end.
+    live_keys = {isle.uv_key for isle in all_islands_flat if isle.uv_key is not None}
+
     for fi, isle in enumerate(all_islands_flat):
+        key = isle.uv_key
+
         if fi in global_inter:
             r, g, b, _ = isle.color
             hc = (r, g, b, opacity)
-            for p1, p2 in ix.generate_hatch(isle.tris):
+            if key is not None and key in _hatch_seg_cache:
+                segs = _hatch_seg_cache[key]
+                _hits += 1
+            else:
+                segs = ix.generate_hatch(isle.tris)
+                if key is not None:
+                    _hatch_seg_cache[key] = segs
+                _miss += 1
+            for p1, p2 in segs:
                 hatch_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
                 hatch_colors  += [hc, hc]
+
         if fi in global_stack:
-            for p1, p2 in ix.generate_cross_hatch(isle.tris):
+            if key is not None and key in _cross_hatch_seg_cache:
+                cross_segs = _cross_hatch_seg_cache[key]
+                _hits += 1
+            else:
+                cross_segs = ix.generate_cross_hatch(isle.tris)
+                if key is not None:
+                    _cross_hatch_seg_cache[key] = cross_segs
+                _miss += 1
+            for p1, p2 in cross_segs:
                 checker_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
                 checker_colors  += [checker_col, checker_col]
+
+    # Evict entries whose islands no longer exist or have moved (uv_key changed).
+    for dead in [k for k in _hatch_seg_cache       if k not in live_keys]:
+        del _hatch_seg_cache[dead]
+    for dead in [k for k in _cross_hatch_seg_cache if k not in live_keys]:
+        del _cross_hatch_seg_cache[dead]
 
     def _make(prim, coords, colors):
         if not coords:
@@ -444,7 +480,8 @@ def _rebuild_intersect_batches(props):
     utils.log("rebuild", f"inter_tris={len(_inter_island_tris)}, "
           f"hatch_segs={len(hatch_coords)//2}, stack={len(global_stack)}")
     utils.log("timing", f"intersect_rebuild={1000*(time.perf_counter()-_t0):.1f}ms  "
-          f"hatch_segs={len(hatch_coords)//2}  offscreen_tris={len(_inter_island_tris)}")
+          f"hatch_segs={len(hatch_coords)//2}  offscreen_tris={len(_inter_island_tris)}  "
+          f"cache hits={_hits} miss={_miss}")
 
 
 def _rebuild_padding_batches(props):
@@ -681,6 +718,8 @@ def unregister():
     _obj_cache.clear()
     _isect_self_cache.clear()
     _isect_cross_cache.clear()
+    _hatch_seg_cache.clear()
+    _cross_hatch_seg_cache.clear()
     _intersect_batches['hatch']   = None
     _intersect_batches['checker'] = None
     _inter_island_tris = []
