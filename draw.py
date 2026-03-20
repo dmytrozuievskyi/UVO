@@ -162,13 +162,16 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
             return current_hash, None, None, None, None
 
         obj_seed = utils.get_string_hash(obj.name)
+        _t_build_start = time.perf_counter()
         islands  = ix.extract_islands(
             bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name
         )
+        _t_extract = time.perf_counter() - _t_build_start
         utils.log("id_extract", (
             f"{obj.name}: {len(islands)} islands, "
             f"{sum(len(i.tris) for i in islands)} tris, "
-            f"{sum(len(i.boundary_segs) for i in islands)} boundary_segs"
+            f"{sum(len(i.boundary_segs) for i in islands)} boundary_segs "
+            f"→ {1000*_t_extract:.1f}ms"
         ))
 
         coords, colors = [], []
@@ -271,15 +274,22 @@ def _rebuild_intersect_batches(props):
         prev     = _isect_self_cache.get(name)
         if prev and prev['uv_hash'] == cur_hash:
             entry = prev
+            utils.log("classify_timing", f"{name}: cache hit")
         else:
             p           = prev or {}
             det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
+            _tc = time.perf_counter()
             inter_idx, stack_idx, uv_kh, i_pairs = ix.classify_islands(
                 det_islands,
                 prev_inter_idx    = p.get('inter_idx'),
                 prev_stack_idx    = p.get('stack_idx'),
                 prev_uv_key_hash  = p.get('uv_key_hash'),
                 prev_inter_pairs  = p.get('inter_pairs'),
+            )
+            utils.log("classify_timing",
+                f"{name}: self {len(islands)}isl "
+                f"{sum(len(i.boundary_segs) for i in islands)}segs "
+                f"→ {1000*(time.perf_counter()-_tc):.1f}ms"
             )
             entry = {'uv_hash': cur_hash, 'inter_idx': inter_idx,
                      'stack_idx': stack_idx,
@@ -308,10 +318,12 @@ def _rebuild_intersect_batches(props):
             prev = _isect_cross_cache.get(pair_key)
             if prev and prev['ha'] == ha and prev['hb'] == hb:
                 entry = prev
+                utils.log("classify_timing", f"{na} × {nb}: cache hit")
             else:
                 p      = prev or {}
                 det_ia = [ix.normalize_island(i) for i in ia] if tiled else ia
                 det_ib = [ix.normalize_island(i) for i in ib] if tiled else ib
+                _tc = time.perf_counter()
                 r_a, r_b, s_a, s_b, uv_h, i_pairs = ix.classify_islands_cross(
                     det_ia, det_ib,
                     prev_inter_a      = p.get('inter_a'),
@@ -320,6 +332,13 @@ def _rebuild_intersect_batches(props):
                     prev_stack_b      = p.get('stack_b'),
                     prev_uv_hash      = p.get('uv_hash'),
                     prev_inter_pairs  = p.get('inter_pairs'),
+                )
+                _segs_a = sum(len(i.boundary_segs) for i in ia)
+                _segs_b = sum(len(i.boundary_segs) for i in ib)
+                utils.log("classify_timing",
+                    f"{na} × {nb}: cross {len(ia)}×{len(ib)}isl "
+                    f"{_segs_a}+{_segs_b}segs "
+                    f"→ {1000*(time.perf_counter()-_tc):.1f}ms"
                 )
                 entry = {'ha': ha, 'hb': hb,
                          'inter_a': r_a, 'inter_b': r_b,
