@@ -252,13 +252,68 @@ def _sat_overlap(island_a, island_b):
     return False
 
 
+_SAMPLE_CENTROIDS = 8   # centroids sampled per island in containment check
+
+
+def _point_in_tris(px, py, tris):
+    """Return True if point (px, py) is inside any triangle in the list
+    Sign-of-cross-product test, O(n). Returns on first hit.
+    """
+    for t in tris:
+        ax, ay = t[0]; bx, by = t[1]; cx, cy = t[2]
+        d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by)
+        d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy)
+        d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay)
+        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+        if not (has_neg and has_pos):
+            return True
+    return False
+
+
+def _sample_overlap(a, b):
+    """Sample up to _SAMPLE_CENTROIDS evenly-spaced tri_centers from each
+    island and test against the other island's triangles.
+
+    Catches containment (one island fully inside another) and partial
+    non-convex overlaps where the overlapping region contains a sampled point.
+    Cost: O(_SAMPLE_CENTROIDS x tris) -- much cheaper than full SAT on large
+    non-overlapping pairs, allowing early exit before SAT is reached.
+    Uses precomputed tri_centers so no extra allocation is needed.
+    """
+    def _test(src_centers, dst_tris):
+        if not src_centers or not dst_tris:
+            return False
+        n    = len(src_centers)
+        step = max(1, n // _SAMPLE_CENTROIDS)
+        for i in range(0, n, step):
+            cx, cy = src_centers[i]
+            if _point_in_tris(cx, cy, dst_tris):
+                return True
+        return False
+
+    return _test(a.tri_centers, b.tris) or _test(b.tri_centers, a.tris)
+
+
 def _islands_overlap_contour(a, b):
-    # Stage 1: boundary crossing — fast, handles most partial overlaps.
-    # Falls through to SAT for closed meshes with no boundary_segs.
+    # Stage 1: boundary crossing.
+    # Catches all partial overlaps where island edges cross.
     if a.boundary_segs and b.boundary_segs:
         if _boundaries_intersect(a.boundary_segs, b.boundary_segs):
             return True
-    # Stage 2: SAT — handles containment and parallel-edge cases.
+
+    # Stage 2: centroid sampling.
+    # Catches containment and partial non-convex overlaps where at least
+    # one sampled centroid lands inside the other island.
+    # For large non-overlapping islands this returns False quickly,
+    # short-circuiting the expensive SAT pass below.
+    if _sample_overlap(a, b):
+        return True
+
+    # Stage 3: full SAT.
+    # Catches remaining edge cases: highly non-convex islands where both
+    # Stage 1 and Stage 2 miss (interlocking comb-like shapes with
+    # a small overlapping region containing no sampled centroid).
     return _sat_overlap(a, b)
 
 
