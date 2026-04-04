@@ -252,68 +252,13 @@ def _sat_overlap(island_a, island_b):
     return False
 
 
-_SAMPLE_CENTROIDS = 8   # centroids sampled per island in containment check
-
-
-def _point_in_tris(px, py, tris):
-    """Return True if point (px, py) is inside any triangle in the list
-    Sign-of-cross-product test, O(n). Returns on first hit.
-    """
-    for t in tris:
-        ax, ay = t[0]; bx, by = t[1]; cx, cy = t[2]
-        d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by)
-        d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy)
-        d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay)
-        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-        if not (has_neg and has_pos):
-            return True
-    return False
-
-
-def _sample_overlap(a, b):
-    """Sample up to _SAMPLE_CENTROIDS evenly-spaced tri_centers from each
-    island and test against the other island's triangles.
-
-    Catches containment (one island fully inside another) and partial
-    non-convex overlaps where the overlapping region contains a sampled point.
-    Cost: O(_SAMPLE_CENTROIDS x tris) -- much cheaper than full SAT on large
-    non-overlapping pairs, allowing early exit before SAT is reached.
-    Uses precomputed tri_centers so no extra allocation is needed.
-    """
-    def _test(src_centers, dst_tris):
-        if not src_centers or not dst_tris:
-            return False
-        n    = len(src_centers)
-        step = max(1, n // _SAMPLE_CENTROIDS)
-        for i in range(0, n, step):
-            cx, cy = src_centers[i]
-            if _point_in_tris(cx, cy, dst_tris):
-                return True
-        return False
-
-    return _test(a.tri_centers, b.tris) or _test(b.tri_centers, a.tris)
-
-
 def _islands_overlap_contour(a, b):
-    # Stage 1: boundary crossing.
-    # Catches all partial overlaps where island edges cross.
+    # Stage 1: boundary crossing — fast, handles most partial overlaps.
+    # Falls through to SAT for closed meshes with no boundary_segs.
     if a.boundary_segs and b.boundary_segs:
         if _boundaries_intersect(a.boundary_segs, b.boundary_segs):
             return True
-
-    # Stage 2: centroid sampling.
-    # Catches containment and partial non-convex overlaps where at least
-    # one sampled centroid lands inside the other island.
-    # For large non-overlapping islands this returns False quickly,
-    # short-circuiting the expensive SAT pass below.
-    if _sample_overlap(a, b):
-        return True
-
-    # Stage 3: full SAT.
-    # Catches remaining edge cases: highly non-convex islands where both
-    # Stage 1 and Stage 2 miss (interlocking comb-like shapes with
-    # a small overlapping region containing no sampled centroid).
+    # Stage 2: SAT — handles containment and parallel-edge cases.
     return _sat_overlap(a, b)
 
 
@@ -458,71 +403,264 @@ def _get_overlapping_pairs_cross(islands_a, islands_b):
     return inter_a, inter_b, stack_a, stack_b, pairs
 
 
-def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
-                     prev_uv_key_hash=None,
-                     prev_inter_pairs=None):
-    """Returns (inter_idx, stack_idx, uv_key_hash, inter_pairs)."""
-    if not islands:
-        return frozenset(), frozenset(), 0, frozenset()
 
+def _get_overlapping_pairs_cached(islands, stacked_idx, stacked_pairs,
+                                   changed_keys, prev_pair_cache):
+    """Spatial grid cull -> overlap test, with per-pair result caching.
+
+    Only re-tests pairs where at least one island uv_key is in changed_keys.
+    Uses hash() for stable pair-key ordering across rebuilds (not id()).
+    """
+    if not islands:
+        return set(), {}
+
+    isle_to_idx = {id(isle): i for i, isle in enumerate(islands)}
+    diags = sorted(
+        math.sqrt((i.aabb[2]-i.aabb[0])**2 + (i.aabb[3]-i.aabb[1])**2)
+        for i in islands
+    )
+    median_diag = diags[len(diags)//2] if diags else 0.1
+    cell_size   = max(0.05, min(0.5, median_diag * 2.0))
+    grid        = _build_spatial_grid(islands, cell_size)
+
+    island_pairs = set()
+    new_cache    = {}
+    tested       = set()
+
+    for cell_isles in grid.values():
+        if len(cell_isles) < 2:
+            continue
+        n = len(cell_isles)
+        for i in range(n):
+            for j in range(i + 1, n):
+                a  = cell_isles[i]
+                b  = cell_isles[j]
+                ia = isle_to_idx[id(a)]
+                ib = isle_to_idx[id(b)]
+                pk = (ia, ib) if ia < ib else (ib, ia)
+                if pk in tested:
+                    continue
+                tested.add(pk)
+                if pk in stacked_pairs:
+                    continue
+                if not _aabb_overlap(a.aabb, b.aabb):
+                    continue
+
+                ka, kb = a.uv_key, b.uv_key
+                # Stable ordering by hash() — consistent across rebuilds
+                # because frozenset hash depends only on content, not address.
+                ck = (ka, kb) if hash(ka) <= hash(kb) else (kb, ka)
+
+                if (ka not in changed_keys and kb not in changed_keys
+                        and prev_pair_cache is not None
+                        and ck in prev_pair_cache):
+                    overlaps = prev_pair_cache[ck]
+                else:
+                    overlaps = _islands_overlap_contour(a, b)
+
+                new_cache[ck] = overlaps
+                if overlaps:
+                    island_pairs.add(pk)
+
+    return island_pairs, new_cache
+
+
+def _get_overlapping_pairs_cross_cached(islands_a, islands_b,
+                                         changed_keys_a, changed_keys_b,
+                                         prev_pair_cache):
+    """Cross-object overlap with per-pair caching.
+
+    Cache key is (ka, kb) — directional (A->B), no reordering needed.
+    Frozenset equality is by value so lookup is stable across rebuilds.
+    """
+    inter_a, inter_b = set(), set()
+    stack_a, stack_b = set(), set()
+    pairs    = []
+    new_cache = {}
+
+    if not islands_a or not islands_b:
+        return inter_a, inter_b, stack_a, stack_b, pairs, new_cache
+
+    idx_b = {id(isle): i for i, isle in enumerate(islands_b)}
+    diags = sorted(
+        math.sqrt((i.aabb[2]-i.aabb[0])**2 + (i.aabb[3]-i.aabb[1])**2)
+        for i in islands_b
+    )
+    median_diag = diags[len(diags)//2] if diags else 0.1
+    cell_size   = max(0.05, min(0.5, median_diag * 2.0))
+    grid_b      = _build_spatial_grid(islands_b, cell_size)
+
+    tested = set()
+    for ia, a in enumerate(islands_a):
+        mn_u, mn_v, mx_u, mx_v = a.aabb
+        cx0 = int(math.floor(mn_u / cell_size))
+        cy0 = int(math.floor(mn_v / cell_size))
+        cx1 = int(math.floor(mx_u / cell_size))
+        cy1 = int(math.floor(mx_v / cell_size))
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                for b in grid_b.get((cx, cy), ()):
+                    ib = idx_b[id(b)]
+                    pk = (ia, ib)
+                    if pk in tested:
+                        continue
+                    tested.add(pk)
+                    if not _aabb_overlap(a.aabb, b.aabb):
+                        continue
+                    if (_aabb_identical(a.aabb, b.aabb)
+                            and a.uv_key and b.uv_key
+                            and a.uv_key == b.uv_key):
+                        stack_a.add(ia)
+                        stack_b.add(ib)
+                        continue
+
+                    ka, kb = a.uv_key, b.uv_key
+                    ck = (ka, kb)   # directional: A->B always
+
+                    if (ka not in changed_keys_a and kb not in changed_keys_b
+                            and prev_pair_cache is not None
+                            and ck in prev_pair_cache):
+                        overlaps = prev_pair_cache[ck]
+                    else:
+                        overlaps = _islands_overlap_contour(a, b)
+
+                    new_cache[ck] = overlaps
+                    if overlaps:
+                        inter_a.add(ia)
+                        inter_b.add(ib)
+                        pairs.append((ia, ib))
+
+    return inter_a, inter_b, stack_a, stack_b, pairs, new_cache
+
+def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
+                     prev_uv_key_hash=None, prev_inter_pairs=None,
+                     prev_island_keys=None, prev_pair_cache=None):
+    """Returns (inter_idx, stack_idx, uv_key_hash, inter_pairs,
+                island_keys, pair_cache).
+
+    island_keys: list of uv_key per island (for diffing next call).
+    pair_cache:  per-pair overlap results for selective re-test.
+    """
+    if not islands:
+        return frozenset(), frozenset(), 0, frozenset(), [], {}
+
+    cur_island_keys = [isle.uv_key for isle in islands]
     cur_uv_key_hash = hash(frozenset(
-        (i, isle.uv_key) for i, isle in enumerate(islands) if isle.uv_key
+        (i, k) for i, k in enumerate(cur_island_keys) if k is not None
     ))
 
-    # Early exit before O(n²) detection — UV positions unchanged.
+    # Full cache hit: nothing changed.
     if (prev_uv_key_hash == cur_uv_key_hash
             and prev_inter_idx is not None
             and prev_stack_idx is not None):
-        from . import utils
+        try:
+            from . import utils
+        except ImportError:
+            import utils
         utils.log("classify", "cache hit")
-        return (prev_inter_idx, prev_stack_idx,
-                cur_uv_key_hash, prev_inter_pairs or frozenset())
+        return (prev_inter_idx, prev_stack_idx, cur_uv_key_hash,
+                prev_inter_pairs or frozenset(),
+                prev_island_keys or cur_island_keys,
+                prev_pair_cache or {})
+
+    # Diff old vs new island keys to find what moved.
+    from collections import Counter as _Counter
+    if prev_island_keys is not None:
+        prev_counts = _Counter(k for k in prev_island_keys if k is not None)
+        cur_counts  = _Counter(k for k in cur_island_keys  if k is not None)
+        changed_keys = set()
+        for k in set(prev_counts) | set(cur_counts):
+            if prev_counts[k] != cur_counts[k]:
+                changed_keys.add(k)
+        if None in cur_island_keys:
+            changed_keys.add(None)
+    else:
+        changed_keys = set(cur_island_keys)
 
     stack_idx, stacked_pairs = _find_stacked(islands)
-    island_pairs = _get_overlapping_pairs(islands, stack_idx, stacked_pairs)
-    inter_idx    = frozenset(idx for pk in island_pairs for idx in pk)
+    island_pairs, new_pair_cache = _get_overlapping_pairs_cached(
+        islands, stack_idx, stacked_pairs, changed_keys, prev_pair_cache
+    )
+    inter_idx = frozenset(idx for pk in island_pairs for idx in pk)
 
-    from . import utils
+    try:
+        from . import utils
+    except ImportError:
+        import utils
+    _reused = sum(1 for ck in new_pair_cache
+                  if prev_pair_cache and ck in prev_pair_cache)
     utils.log("classify", (
         f"{len(islands)} islands, inter={sorted(inter_idx)}, "
-        f"stack={sorted(stack_idx)}, pairs={sorted(island_pairs)}"
+        f"stack={sorted(stack_idx)}, pairs={sorted(island_pairs)}, "
+        f"pair_cache reused={_reused}/{len(new_pair_cache)}"
     ))
 
-    return inter_idx, stack_idx, cur_uv_key_hash, island_pairs
+    return inter_idx, stack_idx, cur_uv_key_hash, island_pairs, cur_island_keys, new_pair_cache
 
 
 def classify_islands_cross(islands_a, islands_b,
                             prev_inter_a=None, prev_inter_b=None,
                             prev_stack_a=None, prev_stack_b=None,
-                            prev_uv_hash=None, prev_inter_pairs=None):
-    """Cross-object. Returns (inter_a, inter_b, stack_a, stack_b, uv_hash, inter_pairs)."""
+                            prev_uv_hash=None, prev_inter_pairs=None,
+                            prev_island_keys_a=None, prev_island_keys_b=None,
+                            prev_pair_cache=None):
+    """Cross-object. Returns (inter_a, inter_b, stack_a, stack_b, uv_hash,
+                              inter_pairs, island_keys_a, island_keys_b, pair_cache)."""
     if not islands_a or not islands_b:
-        return frozenset(), frozenset(), frozenset(), frozenset(), 0, []
+        return frozenset(), frozenset(), frozenset(), frozenset(), 0, [], [], [], {}
 
+    cur_keys_a = [isle.uv_key for isle in islands_a]
+    cur_keys_b = [isle.uv_key for isle in islands_b]
     cur_uv_hash = hash((
-        frozenset((i, isle.uv_key) for i, isle in enumerate(islands_a) if isle.uv_key),
-        frozenset((i, isle.uv_key) for i, isle in enumerate(islands_b) if isle.uv_key),
+        frozenset((i, k) for i, k in enumerate(cur_keys_a) if k is not None),
+        frozenset((i, k) for i, k in enumerate(cur_keys_b) if k is not None),
     ))
 
-    if (prev_inter_a is not None
-            and prev_uv_hash == cur_uv_hash):
+    # Full cache hit.
+    if prev_inter_a is not None and prev_uv_hash == cur_uv_hash:
         return (prev_inter_a, prev_inter_b,
                 prev_stack_a or frozenset(), prev_stack_b or frozenset(),
-                cur_uv_hash, prev_inter_pairs or [])
+                cur_uv_hash, prev_inter_pairs or [],
+                prev_island_keys_a or cur_keys_a,
+                prev_island_keys_b or cur_keys_b,
+                prev_pair_cache or {})
 
-    raw_a, raw_b, s_a, s_b, pairs = _get_overlapping_pairs_cross(
-        islands_a, islands_b
+    from collections import Counter as _Counter
+    def _changed(prev_keys, cur_keys):
+        if prev_keys is None:
+            return set(cur_keys)
+        pc = _Counter(k for k in prev_keys if k is not None)
+        cc = _Counter(k for k in cur_keys  if k is not None)
+        diff = set()
+        for k in set(pc) | set(cc):
+            if pc[k] != cc[k]:
+                diff.add(k)
+        if None in cur_keys:
+            diff.add(None)
+        return diff
+
+    changed_a = _changed(prev_island_keys_a, cur_keys_a)
+    changed_b = _changed(prev_island_keys_b, cur_keys_b)
+
+    raw_a, raw_b, s_a, s_b, pairs, new_pair_cache = _get_overlapping_pairs_cross_cached(
+        islands_a, islands_b, changed_a, changed_b, prev_pair_cache
     )
 
-    from . import utils
+    try:
+        from . import utils
+    except ImportError:
+        import utils
+    _reused = sum(1 for ck in new_pair_cache
+                  if prev_pair_cache and ck in prev_pair_cache)
     utils.log("classify_cross", (
         f"A:{len(islands_a)} B:{len(islands_b)} islands, "
         f"inter_a={sorted(raw_a)}, inter_b={sorted(raw_b)}, "
         f"stack_a={sorted(s_a)}, stack_b={sorted(s_b)}, "
-        f"pairs={pairs}"
+        f"pairs={pairs}, pair_cache reused={_reused}/{len(new_pair_cache)}"
     ))
 
-    return frozenset(raw_a), frozenset(raw_b), frozenset(s_a), frozenset(s_b), cur_uv_hash, pairs
+    return (frozenset(raw_a), frozenset(raw_b), frozenset(s_a), frozenset(s_b),
+            cur_uv_hash, pairs, cur_keys_a, cur_keys_b, new_pair_cache)
 
 
 def generate_hatch(tris, gap=0.01, angle_deg=45):

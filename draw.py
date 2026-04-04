@@ -34,6 +34,10 @@ _inter_threshold = 0.6
 
 _shader = None
 
+# Async classify tracking
+_classify_job_id    = 0   # id of the most recently dispatched classify job
+_classify_timer_fn  = None  # bpy timer reference
+
 # Sentinel: pre-pass failed for this object — use n=1 fallback, keeping
 # palette offsets consistent with what the pre-pass recorded.
 _PREPASS_FAILED = object()
@@ -76,6 +80,7 @@ def _cancel_debounce():
 
 def full_refresh(context):
     """Clear all caches and rebuild. Call when settings change (opacity, mode, etc.)."""
+    _cancel_classify_timer()
     _obj_cache.clear()
     _isect_self_cache.clear()
     _isect_cross_cache.clear()
@@ -162,16 +167,13 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
             return current_hash, None, None, None, None
 
         obj_seed = utils.get_string_hash(obj.name)
-        _t_build_start = time.perf_counter()
         islands  = ix.extract_islands(
             bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name
         )
-        _t_extract = time.perf_counter() - _t_build_start
         utils.log("id_extract", (
             f"{obj.name}: {len(islands)} islands, "
             f"{sum(len(i.tris) for i in islands)} tris, "
-            f"{sum(len(i.boundary_segs) for i in islands)} boundary_segs "
-            f"→ {1000*_t_extract:.1f}ms"
+            f"{sum(len(i.boundary_segs) for i in islands)} boundary_segs"
         ))
 
         coords, colors = [], []
@@ -239,11 +241,415 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
             bm_copy.free()
 
 
+
+def _serialize_islands_for_worker(tiled):
+    """Pack all cached island data into plain types for the worker subprocess.
+
+    Also bundles the previous classify cache entries so the worker can do
+    per-pair caching without re-testing unchanged pairs.
+    """
+    import sys as _sys
+    pkg = _sys.modules.get(__package__)
+
+    objects = []
+    for name, cache in _obj_cache.items():
+        islands = cache.get('islands') or []
+        prev_self = _isect_self_cache.get(name, {})
+        cur_hash = cache.get('hash')
+
+        if pkg and pkg.get_synced_hash(name) == cur_hash:
+            ser_islands = None
+        else:
+            ser_islands = []
+            for isle in islands:
+                # Flatten tris and boundary_segs to avoid nested tuple overhead
+                flat_tris = [
+                    (t[0][0], t[0][1], t[1][0], t[1][1], t[2][0], t[2][1])
+                    for t in isle.tris
+                ]
+                flat_segs = [
+                    (s[0][0], s[0][1], s[1][0], s[1][1])
+                    for s in isle.boundary_segs
+                ]
+                ser_islands.append({
+                    'flat_tris':   flat_tris,
+                    'flat_segs':   flat_segs,
+                    'color':       isle.color,
+                    'object_name': isle.object_name,
+                    'uv_key':      isle.uv_key,
+                })
+            if pkg:
+                pkg.mark_synced(name, cur_hash)
+
+        objects.append({
+            'name':      name,
+            'hash':      cur_hash,
+            'islands':   ser_islands,
+            'prev_self': {
+                'inter_idx':   prev_self.get('inter_idx'),
+                'stack_idx':   prev_self.get('stack_idx'),
+                'uv_key_hash': prev_self.get('uv_key_hash'),
+                'inter_pairs': prev_self.get('inter_pairs'),
+                'island_keys': prev_self.get('island_keys'),
+                'pair_cache':  prev_self.get('pair_cache'),
+            },
+        })
+
+    # Bundle cross-cache previous state
+    cross_prev = {}
+    for pair_key, entry in _isect_cross_cache.items():
+        cross_prev[pair_key] = {
+            'inter_a':       entry.get('inter_a'),
+            'inter_b':       entry.get('inter_b'),
+            'stack_a':       entry.get('stack_a'),
+            'stack_b':       entry.get('stack_b'),
+            'uv_hash':       entry.get('uv_hash'),
+            'inter_pairs':   entry.get('inter_pairs'),
+            'island_keys_a': entry.get('island_keys_a'),
+            'island_keys_b': entry.get('island_keys_b'),
+            'pair_cache':    entry.get('pair_cache'),
+        }
+
+    return objects, cross_prev
+
+
+def _dispatch_classify_job(props):
+    """Serialize island data and send a classify_all job to the worker.
+
+    Returns True if the job was dispatched, False if the worker is unavailable.
+    """
+    global _classify_job_id
+    import sys as _sys
+    pkg = _sys.modules.get(__package__)
+    if pkg is None:
+        return False
+
+    tiled = (props.intersect_uv_mode == 'TILED')
+    objects, cross_prev = _serialize_islands_for_worker(tiled)
+
+    job_id = pkg.next_job_id()
+    _classify_job_id = job_id
+
+    ok = pkg.send_job({
+        'id':         job_id,
+        'type':       'classify_all',
+        'tiled':      tiled,
+        'objects':    objects,
+        'cross_prev': cross_prev,
+    })
+    utils.log("async", f"classify job dispatched id={job_id} ok={ok}")
+    return ok
+
+
+def _start_classify_timer():
+    """Register a repeating timer to poll for classify results."""
+    global _classify_timer_fn
+    _cancel_classify_timer()
+
+    def _poll():
+        import sys as _sys
+        pkg = _sys.modules.get(__package__)
+        if pkg is None:
+            return None
+
+        rq = pkg.get_result_queue()
+        if rq is None:
+            return None
+
+        try:
+            result = rq.get_nowait()
+        except Exception:
+            # Nothing ready yet — check again later.
+            return 0.05
+
+        if result.get('type') == 'error':
+            utils.log("async", f"worker error: {result.get('msg')}")
+            return None
+
+        if result.get('type') != 'classify_all_result':
+            # ping/pong or unknown — put back and stop timer
+            return None
+
+        job_id = result.get('id')
+        if job_id != _classify_job_id:
+            utils.log("async", f"discarding stale result id={job_id}")
+            return 0.05   # keep polling — our result may still be coming
+
+        _apply_classify_result(result)
+        return None  # unregister timer
+
+    _classify_timer_fn = _poll
+    bpy.app.timers.register(_poll, first_interval=0.05)
+
+
+def _cancel_classify_timer():
+    global _classify_timer_fn
+    if _classify_timer_fn is not None:
+        try:
+            bpy.app.timers.unregister(_classify_timer_fn)
+        except Exception:
+            pass
+        _classify_timer_fn = None
+
+
+def _apply_classify_result(result):
+    """Apply a classify_all_result from the worker to the local caches.
+
+    Rebuilds hatch/checker batches and triggers a redraw. Called from the
+    polling timer — always on the main thread.
+    """
+    self_results  = result.get('self_results', {})
+    cross_results = result.get('cross_results', {})
+
+    # Update self-cache
+    for name, entry in self_results.items():
+        if name in _obj_cache:
+            _isect_self_cache[name] = entry
+
+    # Update cross-cache
+    for pair_key, entry in cross_results.items():
+        _isect_cross_cache[pair_key] = entry
+
+    # Evict stale entries for objects no longer in cache
+    for name in list(_isect_self_cache):
+        if name not in _obj_cache:
+            del _isect_self_cache[name]
+    active_pairs = set()
+    names = list(_obj_cache.keys())
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            na, nb = names[i], names[j]
+            active_pairs.add((na, nb) if na <= nb else (nb, na))
+    for pk in list(_isect_cross_cache):
+        if pk not in active_pairs:
+            del _isect_cross_cache[pk]
+
+    # Check if any active overlay prop is available
+    try:
+        props = bpy.context.scene.uv_id_props
+    except Exception:
+        return
+
+    if props.show_intersect and not props.is_muted:
+        _rebuild_hatch_from_cache(props)
+
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'IMAGE_EDITOR':
+                    area.tag_redraw()
+    except Exception:
+        pass
+
+    utils.log("async", f"classify result applied, job_id={result.get('id')}")
+
+
+def _rebuild_hatch_from_cache(props):
+    """Rebuild hatch/checker GPU batches from the current classify caches.
+
+    Called after async classify result arrives — does NOT re-run classify.
+    Identical logic to the batch-building part of _rebuild_intersect_batches.
+    """
+    global _inter_island_tris, _inter_gray, _inter_threshold
+
+    shader   = _get_shader()
+    opacity  = props.intersect_opacity
+    tiled    = (props.intersect_uv_mode == 'TILED')
+
+    all_islands_flat = [
+        isle
+        for cache in _obj_cache.values()
+        if cache.get('islands')
+        for isle in cache['islands']
+    ]
+
+    global_inter       = set()
+    global_stack       = set()
+    global_inter_pairs = set()
+
+    obj_names    = list(_obj_cache.keys())
+    base_indices = {}
+    idx = 0
+    for name, cache in _obj_cache.items():
+        base_indices[name] = idx
+        idx += len(cache.get('islands') or [])
+
+    for name in obj_names:
+        entry = _isect_self_cache.get(name)
+        if not entry:
+            continue
+        base = base_indices[name]
+        for li in entry.get('inter_idx', ()):
+            global_inter.add(base + li)
+        for li in entry.get('stack_idx', ()):
+            global_stack.add(base + li)
+        for la, lb in entry.get('inter_pairs') or ():
+            fa, fb = base + la, base + lb
+            global_inter_pairs.add((fa, fb) if fa < fb else (fb, fa))
+
+    for i in range(len(obj_names)):
+        for j in range(i + 1, len(obj_names)):
+            na, nb   = obj_names[i], obj_names[j]
+            pair_key = (na, nb) if na <= nb else (nb, na)
+            entry    = _isect_cross_cache.get(pair_key)
+            if not entry:
+                continue
+            base_a, base_b = base_indices[na], base_indices[nb]
+            for li in entry.get('inter_a', ()):
+                global_inter.add(base_a + li)
+            for li in entry.get('inter_b', ()):
+                global_inter.add(base_b + li)
+            for li in entry.get('stack_a', ()):
+                global_stack.add(base_a + li)
+            for li in entry.get('stack_b', ()):
+                global_stack.add(base_b + li)
+            for la, lb in entry.get('inter_pairs') or ():
+                fa, fb = base_a + la, base_b + lb
+                global_inter_pairs.add((fa, fb) if fa < fb else (fb, fa))
+
+    # Tile-crossing detection
+    tile_crossing_flat = set()
+    if tiled:
+        for name, cache in _obj_cache.items():
+            islands = cache.get('islands') or []
+            base    = base_indices[name]
+            for li in ix.find_tile_crossing_islands(islands):
+                fi = base + li
+                global_inter.add(fi)
+                tile_crossing_flat.add(fi)
+
+    # Build hatch/checker batches (reuses seg cache)
+    hatch_coords, hatch_colors     = [], []
+    checker_coords, checker_colors = [], []
+    checker_col = (1.0, 1.0, 1.0, opacity)
+    _hits = _miss = 0
+    live_keys = {isle.uv_key for isle in all_islands_flat if isle.uv_key is not None}
+
+    for fi, isle in enumerate(all_islands_flat):
+        key = isle.uv_key
+        if fi in global_inter:
+            r, g, b, _ = isle.color
+            hc = (r, g, b, opacity)
+            if key is not None and key in _hatch_seg_cache:
+                segs = _hatch_seg_cache[key]; _hits += 1
+            else:
+                segs = ix.generate_hatch(isle.tris)
+                if key is not None:
+                    _hatch_seg_cache[key] = segs
+                _miss += 1
+            for p1, p2 in segs:
+                hatch_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
+                hatch_colors  += [hc, hc]
+        if fi in global_stack:
+            if key is not None and key in _cross_hatch_seg_cache:
+                cross_segs = _cross_hatch_seg_cache[key]; _hits += 1
+            else:
+                cross_segs = ix.generate_cross_hatch(isle.tris)
+                if key is not None:
+                    _cross_hatch_seg_cache[key] = cross_segs
+                _miss += 1
+            for p1, p2 in cross_segs:
+                checker_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
+                checker_colors  += [checker_col, checker_col]
+
+    for dead in [k for k in _hatch_seg_cache       if k not in live_keys]:
+        del _hatch_seg_cache[dead]
+    for dead in [k for k in _cross_hatch_seg_cache if k not in live_keys]:
+        del _cross_hatch_seg_cache[dead]
+
+    def _make(prim, coords, colors):
+        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else None
+
+    _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
+    _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
+
+    # Offscreen tris
+    _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
+                          tile_crossing_flat, tiled)
+    utils.log("async", f"hatch rebuilt: hatch_segs={len(hatch_coords)//2} "
+              f"stack={len(global_stack)} hits={_hits} miss={_miss}")
+
+
+def _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
+                          tile_crossing_flat, tiled):
+    """Populate _inter_island_tris for the offscreen red fill pass."""
+    global _inter_island_tris, _inter_gray, _inter_threshold
+
+    seen_norm_keys = set()
+    inter_tris_raw = []
+    n_unique       = 0
+
+    def _island_in_tile0(isle):
+        cx = (isle.aabb[0] + isle.aabb[2]) * 0.5
+        cy = (isle.aabb[1] + isle.aabb[3]) * 0.5
+        return (max(0, math.floor(cx)) == 0 and max(0, math.floor(cy)) == 0)
+
+    if tiled:
+        for fi in tile_crossing_flat:
+            isle = all_islands_flat[fi]
+            mn_u, mn_v, mx_u, mx_v = isle.aabb
+            touches_tile0 = (mn_u < 1.0 - ix.UV_EPS and mx_u > ix.UV_EPS and
+                             mn_v < 1.0 - ix.UV_EPS and mx_v > ix.UV_EPS)
+            if touches_tile0:
+                inter_tris_raw.append(isle.tris)
+                inter_tris_raw.append(isle.tris)
+                n_unique += 1
+
+        for fi_a, fi_b in global_inter_pairs:
+            if fi_a in tile_crossing_flat or fi_b in tile_crossing_flat:
+                continue
+            isle_a = all_islands_flat[fi_a]
+            isle_b = all_islands_flat[fi_b]
+            if not _island_in_tile0(isle_a) and not _island_in_tile0(isle_b):
+                continue
+            norm_a = ix.normalize_island(isle_a)
+            norm_b = ix.normalize_island(isle_b)
+            for norm in (norm_a, norm_b):
+                key = norm.uv_key
+                if key is not None:
+                    if key in seen_norm_keys:
+                        continue
+                    seen_norm_keys.add(key)
+                inter_tris_raw.append(norm.tris)
+                n_unique += 1
+    else:
+        for fi, isle in enumerate(all_islands_flat):
+            if fi not in global_inter:
+                continue
+            key = isle.uv_key
+            if key is not None:
+                if key in seen_norm_keys:
+                    continue
+                seen_norm_keys.add(key)
+            inter_tris_raw.append(isle.tris)
+            n_unique += 1
+
+    _inter_gray      = 1.0 / (n_unique + 1) if n_unique > 0 else 0.5
+    _inter_threshold = _inter_gray * 1.5
+    _inter_island_tris = [tri for tris in inter_tris_raw for tri in tris]
+    offscreen.mark_dirty()
+
+
 def _rebuild_intersect_batches(props):
+    """Classify islands and rebuild hatch/checker batches.
+
+    If the background worker is available, dispatches the classify job
+    asynchronously and returns immediately — results arrive via _apply_classify_result.
+    Falls back to synchronous classify if the worker is not running.
+    """
     global _inter_island_tris
 
     _t0 = time.perf_counter()
 
+    # ── Try async path first ──────────────────────────────────────────────────
+    if _dispatch_classify_job(props):
+        _start_classify_timer()
+        utils.log("async", "classify dispatched to worker — returning immediately")
+        return
+
+    utils.log("async", "worker unavailable — falling back to sync classify")
+
+    # ── Synchronous fallback ──────────────────────────────────────────────────
     shader   = _get_shader()
     opacity  = props.intersect_opacity
     tiled    = (props.intersect_uv_mode == 'TILED')
@@ -274,22 +680,15 @@ def _rebuild_intersect_batches(props):
         prev     = _isect_self_cache.get(name)
         if prev and prev['uv_hash'] == cur_hash:
             entry = prev
-            utils.log("classify_timing", f"{name}: cache hit")
         else:
             p           = prev or {}
             det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
-            _tc = time.perf_counter()
             inter_idx, stack_idx, uv_kh, i_pairs = ix.classify_islands(
                 det_islands,
                 prev_inter_idx    = p.get('inter_idx'),
                 prev_stack_idx    = p.get('stack_idx'),
                 prev_uv_key_hash  = p.get('uv_key_hash'),
                 prev_inter_pairs  = p.get('inter_pairs'),
-            )
-            utils.log("classify_timing",
-                f"{name}: self {len(islands)}isl "
-                f"{sum(len(i.boundary_segs) for i in islands)}segs "
-                f"→ {1000*(time.perf_counter()-_tc):.1f}ms"
             )
             entry = {'uv_hash': cur_hash, 'inter_idx': inter_idx,
                      'stack_idx': stack_idx,
@@ -318,12 +717,10 @@ def _rebuild_intersect_batches(props):
             prev = _isect_cross_cache.get(pair_key)
             if prev and prev['ha'] == ha and prev['hb'] == hb:
                 entry = prev
-                utils.log("classify_timing", f"{na} × {nb}: cache hit")
             else:
                 p      = prev or {}
                 det_ia = [ix.normalize_island(i) for i in ia] if tiled else ia
                 det_ib = [ix.normalize_island(i) for i in ib] if tiled else ib
-                _tc = time.perf_counter()
                 r_a, r_b, s_a, s_b, uv_h, i_pairs = ix.classify_islands_cross(
                     det_ia, det_ib,
                     prev_inter_a      = p.get('inter_a'),
@@ -332,13 +729,6 @@ def _rebuild_intersect_batches(props):
                     prev_stack_b      = p.get('stack_b'),
                     prev_uv_hash      = p.get('uv_hash'),
                     prev_inter_pairs  = p.get('inter_pairs'),
-                )
-                _segs_a = sum(len(i.boundary_segs) for i in ia)
-                _segs_b = sum(len(i.boundary_segs) for i in ib)
-                utils.log("classify_timing",
-                    f"{na} × {nb}: cross {len(ia)}×{len(ib)}isl "
-                    f"{_segs_a}+{_segs_b}segs "
-                    f"→ {1000*(time.perf_counter()-_tc):.1f}ms"
                 )
                 entry = {'ha': ha, 'hb': hb,
                          'inter_a': r_a, 'inter_b': r_b,
@@ -672,10 +1062,8 @@ def update_batches_safe(context):
                     'id_coords': new_id_coords,   # raw (x,y,z) list — used by _rebuild_id_opacity
                     'id_rgba':   new_id_rgba,     # raw (r,g,b,a) list — alpha swapped on opacity change
                 }
-                _isect_self_cache.pop(obj.name, None)
-                for pk in list(_isect_cross_cache):
-                    if obj.name in pk:
-                        del _isect_cross_cache[pk]
+                # Do NOT pop _isect_self_cache or _isect_cross_cache here!
+                # The worker needs the previous cache state to do per-island pair-cache diffs.
                 any_changed = True
             elif new_hash is not None and obj.name not in _obj_cache:
                 any_changed = True
@@ -836,6 +1224,7 @@ def unregister():
         bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_handler)
 
     _cancel_debounce()
+    _cancel_classify_timer()
 
     offscreen.free()
     padding.clear()
