@@ -39,17 +39,6 @@ def get_string_hash(s):
 _last: dict = {}
 
 
-def complex_highlight_enabled() -> bool:
-    """Return True when the offscreen red-fill pass is enabled in addon preferences."""
-    try:
-        import bpy as _bpy
-        prefs = _bpy.context.preferences.addons.get(__package__)
-        if prefs is None:
-            return False
-        return getattr(prefs.preferences, 'complex_intersection', False)
-    except Exception:
-        return False
-
 
 def _debug_enabled() -> bool:
     try:

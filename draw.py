@@ -1180,8 +1180,8 @@ def draw_callback():
             if _intersect_batches['checker']:
                 _intersect_batches['checker'].draw(shader)
 
-            # ── Pass 4: offscreen overlap fill (requires Complex Intersection pref) ──
-            if _inter_island_tris and utils.complex_highlight_enabled():
+            # ── Pass 4: offscreen overlap fill (always drawn if intersections exist) ──
+            if _inter_island_tris:
                 utils.log("pass4", f"tris={len(_inter_island_tris)}")
                 if offscreen.check_view_matrix():
                     offscreen.mark_dirty()

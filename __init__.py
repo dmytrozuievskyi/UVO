@@ -241,16 +241,6 @@ preview_collections = {}
 class UVOAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
-    complex_intersection: bpy.props.BoolProperty(
-        name="Complex Intersection Highlight",
-        description=(
-            "Show a red fill over overlapping UV areas using an offscreen GPU buffer. "
-            "More memory- and GPU-intensive — disable on heavy scenes if you only need "
-            "the hatch lines to identify problem islands"
-        ),
-        default=False,
-    )
-
     debug: bpy.props.BoolProperty(
         name="Debug Logging",
         description=(
@@ -261,19 +251,8 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
     )
 
     def draw(self, context):
-        import sys as _sys
         layout = self.layout
-        layout.prop(self, "complex_intersection")
         layout.prop(self, "debug")
-        layout.separator()
-        row = layout.row()
-        row.operator("uv.ping_worker", icon="PLAY")
-        pkg  = _sys.modules.get(__name__)
-        proc = getattr(pkg, "_worker_process", None) if pkg else None
-        if proc is not None and proc.poll() is None:
-            row.label(text=f"Worker running (pid={proc.pid})", icon="CHECKMARK")
-        else:
-            row.label(text="Worker not running", icon="ERROR")
 
 
 def register():
