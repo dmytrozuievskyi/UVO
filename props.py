@@ -90,6 +90,7 @@ def update_intersect_settings(self, context):
     # Mode or opacity changed — full rebuild needed.
     from . import draw
     draw.full_refresh(context)
+    _sync_draw(context)
 
 
 def update_padding(self, context):

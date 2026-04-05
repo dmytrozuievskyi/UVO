@@ -1,5 +1,4 @@
 import bpy
-import time
 
 
 class UV_OT_ToggleOverlay(bpy.types.Operator):

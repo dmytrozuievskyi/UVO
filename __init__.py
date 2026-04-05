@@ -38,33 +38,6 @@ def _write_job(proc, job):
     proc.stdin.flush()
 
 
-def _read_result(proc, timeout=5.0):
-    """Read one result dict from the worker's stdout pipe.
-
-    Runs in a thread so we can apply a timeout without blocking the main thread.
-    Returns the result dict, or raises queue.Empty on timeout.
-    """
-    import queue as _queue
-
-    result_holder = _queue.Queue()
-
-    def _reader():
-        try:
-            header = proc.stdout.read(4)
-            if len(header) < 4:
-                result_holder.put(None)
-                return
-            size = struct.unpack('>I', header)[0]
-            data = proc.stdout.read(size)
-            result_holder.put(pickle.loads(data))
-        except Exception as e:
-            result_holder.put(e)
-
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
-    return result_holder.get(timeout=timeout)
-
-
 def get_worker_process():
     return _worker_process
 
