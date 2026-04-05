@@ -683,16 +683,19 @@ def _rebuild_intersect_batches(props):
         else:
             p           = prev or {}
             det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
-            inter_idx, stack_idx, uv_kh, i_pairs = ix.classify_islands(
+            inter_idx, stack_idx, uv_kh, i_pairs, island_keys, pair_cache = ix.classify_islands(
                 det_islands,
                 prev_inter_idx    = p.get('inter_idx'),
                 prev_stack_idx    = p.get('stack_idx'),
                 prev_uv_key_hash  = p.get('uv_key_hash'),
                 prev_inter_pairs  = p.get('inter_pairs'),
+                prev_island_keys  = p.get('island_keys'),
+                prev_pair_cache   = p.get('pair_cache'),
             )
             entry = {'uv_hash': cur_hash, 'inter_idx': inter_idx,
                      'stack_idx': stack_idx,
-                     'uv_key_hash': uv_kh, 'inter_pairs': i_pairs}
+                     'uv_key_hash': uv_kh, 'inter_pairs': i_pairs,
+                     'island_keys': island_keys, 'pair_cache': pair_cache}
             _isect_self_cache[name] = entry
         base = base_indices[name]
         for li in entry['inter_idx']:
@@ -721,19 +724,24 @@ def _rebuild_intersect_batches(props):
                 p      = prev or {}
                 det_ia = [ix.normalize_island(i) for i in ia] if tiled else ia
                 det_ib = [ix.normalize_island(i) for i in ib] if tiled else ib
-                r_a, r_b, s_a, s_b, uv_h, i_pairs = ix.classify_islands_cross(
+                r_a, r_b, s_a, s_b, uv_h, i_pairs, keys_a, keys_b, pair_cache = ix.classify_islands_cross(
                     det_ia, det_ib,
-                    prev_inter_a      = p.get('inter_a'),
-                    prev_inter_b      = p.get('inter_b'),
-                    prev_stack_a      = p.get('stack_a'),
-                    prev_stack_b      = p.get('stack_b'),
-                    prev_uv_hash      = p.get('uv_hash'),
-                    prev_inter_pairs  = p.get('inter_pairs'),
+                    prev_inter_a       = p.get('inter_a'),
+                    prev_inter_b       = p.get('inter_b'),
+                    prev_stack_a       = p.get('stack_a'),
+                    prev_stack_b       = p.get('stack_b'),
+                    prev_uv_hash       = p.get('uv_hash'),
+                    prev_inter_pairs   = p.get('inter_pairs'),
+                    prev_island_keys_a = p.get('island_keys_a'),
+                    prev_island_keys_b = p.get('island_keys_b'),
+                    prev_pair_cache    = p.get('pair_cache'),
                 )
                 entry = {'ha': ha, 'hb': hb,
                          'inter_a': r_a, 'inter_b': r_b,
                          'stack_a': s_a, 'stack_b': s_b,
-                         'uv_hash': uv_h, 'inter_pairs': i_pairs}
+                         'uv_hash': uv_h, 'inter_pairs': i_pairs,
+                         'island_keys_a': keys_a, 'island_keys_b': keys_b,
+                         'pair_cache': pair_cache}
                 _isect_cross_cache[pair_key] = entry
 
             base_a = base_indices[na]
