@@ -16,7 +16,9 @@ import pickle
 import threading
 import time
 
-#PROTECT IPC PIPE FROM ROGUE PRINTS
+# PROTECT IPC PIPE FROM ROGUE PRINTS:
+# Blender does not drain stderr. Never print() directly to it, or the 
+# 4KB OS buffer will fill up and permanently freeze the worker thread.
 ipc_out = sys.stdout.buffer
 sys.stdout = sys.stderr
 
@@ -24,14 +26,15 @@ sys.stdout = sys.stderr
 # worker can write an informative error before being killed externally.
 JOB_TIMEOUT_SECS = 6.5
 
-# Per-session log file — %TEMP%\uvo_worker_<pid>.log (Windows) or /tmp/...
-# Never print() to stderr: Blender does not drain it, so any write once
-# the 4 KB OS buffer is full will block the thread permanently.
-_LOG_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), "uvo_worker.log")
+_LOG_PATH = None
 _log_lock = threading.Lock()
+DEBUG_MODE = False
 
 
 def _wlog(msg):
+    if not DEBUG_MODE or not _LOG_PATH:
+        return
+        
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}\n"
     with _log_lock:
@@ -82,21 +85,13 @@ def _deserialize_island(d, ix):
     return isle
 
 
-#classify_all handler 
+# classify_all handler 
 
 _worker_mesh_cache = {}  # {name: {'hash': int, 'islands': list, 'det_islands': list}}
 
 
 def _handle_classify_all(job, ix):
-    """Run full self + cross classify for all objects in the job.
-
-    Job fields:
-        tiled   : bool
-        objects : list of {name, hash, islands:[serialized], prev_self:{...}}
-        cross_prev : {(na,nb): {...}}  — previous cross-cache entries
-
-    Returns classify_all_result with self_results and cross_results.
-    """
+    """Run full self + cross classify for all objects in the job."""
     tiled      = job.get('tiled', True)
     obj_data   = job.get('objects', [])
     cross_prev = job.get('cross_prev', {})
@@ -104,7 +99,7 @@ def _handle_classify_all(job, ix):
 
     t0 = time.perf_counter()
 
-    #Deserialize / pull from cache 
+    # Deserialize / pull from cache 
     active_names = {od['name'] for od in obj_data}
     for name in list(_worker_mesh_cache.keys()):
         if name not in active_names:
@@ -249,18 +244,20 @@ def main():
     if addon_dir not in sys.path:
         sys.path.insert(0, addon_dir)
 
-    # Per-session log — PID in filename so parallel sessions don't clobber each other.
-    pid = os.getpid()
-    global _LOG_PATH
-    _LOG_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), f"uvo_worker_{pid}.log")
-    try:
-        with open(_LOG_PATH, "w", encoding="utf-8") as f:
-            f.write(f"=== UVO worker started pid={pid} ===\n")
-        with open(os.path.join(os.environ.get("TEMP", "/tmp"),
-                               "uvo_worker_latest.log.pid"), "w") as f:
-            f.write(_LOG_PATH)
-    except Exception:
-        pass
+    # Only setup logging if requested
+    global DEBUG_MODE, _LOG_PATH
+    if "--debug" in sys.argv:
+        DEBUG_MODE = True
+        pid = os.getpid()
+        _LOG_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), f"uvo_worker_{pid}.log")
+        try:
+            with open(_LOG_PATH, "w", encoding="utf-8") as f:
+                f.write(f"=== UVO worker started pid={pid} ===\n")
+            with open(os.path.join(os.environ.get("TEMP", "/tmp"),
+                                   "uvo_worker_latest.log.pid"), "w") as f:
+                f.write(_LOG_PATH)
+        except Exception:
+            pass
 
     _wlog(f"addon_dir={addon_dir}")
 

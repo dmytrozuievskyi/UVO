@@ -154,10 +154,15 @@ def start_worker():
         return
 
     python_exe = sys.executable
+    cmd = [python_exe, worker_script, addon_dir]
+    
+    # Send --debug flag if enabled in addon preferences
+    if utils._debug_enabled():
+        cmd.append("--debug")
 
     try:
         _worker_process = subprocess.Popen(
-            [python_exe, worker_script, addon_dir],
+            cmd,
             stdin  = subprocess.PIPE,
             stdout = subprocess.PIPE,
             stderr = subprocess.PIPE,
@@ -220,6 +225,12 @@ import bpy.utils.previews
 preview_collections = {}
 
 
+def update_debug_pref(self, context):
+    """Restart the worker dynamically if the user changes the debug toggle."""
+    stop_worker()
+    start_worker()
+
+
 class UVOAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
@@ -227,9 +238,10 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
         name="Debug Logging",
         description=(
             "Print [UVO] debug messages to the system console, "
-            "including rebuild timing"
+            "including worker file logs and rebuild timing"
         ),
         default=False,
+        update=update_debug_pref
     )
 
     def draw(self, context):
