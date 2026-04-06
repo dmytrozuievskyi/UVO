@@ -13,14 +13,36 @@ import sys
 import os
 import struct
 import pickle
+import threading
+import time
 
-# ── PROTECT IPC PIPE FROM ROGUE PRINTS ────────────────────────────────────────
+#PROTECT IPC PIPE FROM ROGUE PRINTS
 ipc_out = sys.stdout.buffer
 sys.stdout = sys.stderr
-# ──────────────────────────────────────────────────────────────────────────────
+
+# Worker-side timeout. Slightly less than the draw.py watchdog (8 s) so the
+# worker can write an informative error before being killed externally.
+JOB_TIMEOUT_SECS = 6.5
+
+# Per-session log file — %TEMP%\uvo_worker_<pid>.log (Windows) or /tmp/...
+# Never print() to stderr: Blender does not drain it, so any write once
+# the 4 KB OS buffer is full will block the thread permanently.
+_LOG_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), "uvo_worker.log")
+_log_lock = threading.Lock()
 
 
-# ── Pipe I/O ──────────────────────────────────────────────────────────────────
+def _wlog(msg):
+    ts   = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}\n"
+    with _log_lock:
+        try:
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+
+
+# Pipe I/O 
 
 def _read_job(stream):
     header = stream.read(4)
@@ -40,7 +62,7 @@ def _write_result(stream, result):
     stream.flush()
 
 
-# ── Island reconstruction ─────────────────────────────────────────────────────
+# Island reconstruction 
 
 def _deserialize_island(d, ix):
     """Reconstruct an intersect.Island from a serialized dict."""
@@ -56,31 +78,11 @@ def _deserialize_island(d, ix):
     ]
     isle               = ix.Island(tris, d['color'], d['object_name'])
     isle.boundary_segs = boundary_segs
-    isle.uv_key        = d['uv_key']      # frozenset — picklable
-    # aabb and tri_centers already computed in Island.__init__ from tris
+    isle.uv_key        = d['uv_key']
     return isle
 
 
-def _serialize_island(isle):
-    """Pack an Island into plain types for pipe transfer."""
-    flat_tris = [
-        (t[0][0], t[0][1], t[1][0], t[1][1], t[2][0], t[2][1])
-        for t in isle.tris
-    ]
-    flat_segs = [
-        (s[0][0], s[0][1], s[1][0], s[1][1])
-        for s in isle.boundary_segs
-    ]
-    return {
-        'flat_tris':   flat_tris,
-        'flat_segs':   flat_segs,
-        'color':       isle.color,
-        'object_name': isle.object_name,
-        'uv_key':      isle.uv_key,
-    }
-
-
-# ── classify_all handler ──────────────────────────────────────────────────────
+#classify_all handler 
 
 _worker_mesh_cache = {}  # {name: {'hash': int, 'islands': list, 'det_islands': list}}
 
@@ -95,37 +97,38 @@ def _handle_classify_all(job, ix):
 
     Returns classify_all_result with self_results and cross_results.
     """
-    tiled    = job.get('tiled', True)
-    obj_data = job.get('objects', [])
+    tiled      = job.get('tiled', True)
+    obj_data   = job.get('objects', [])
     cross_prev = job.get('cross_prev', {})
+    job_id     = job.get('id', '?')
 
-    # Deserialize all islands
-    objects = []
+    t0 = time.perf_counter()
+
+    #Deserialize / pull from cache 
     active_names = {od['name'] for od in obj_data}
     for name in list(_worker_mesh_cache.keys()):
         if name not in active_names:
             del _worker_mesh_cache[name]
 
+    objects = []
     for od in obj_data:
         raw_islands = od.get('islands')
         name = od['name']
-        h = od['hash']
+        h    = od['hash']
 
         if raw_islands is not None:
             islands = [_deserialize_island(d, ix) for d in raw_islands]
-            if tiled:
-                det_islands = [ix.normalize_island(i) for i in islands]
-            else:
-                det_islands = islands
-            _worker_mesh_cache[name] = {'hash': h, 'islands': islands, 'det_islands': det_islands}
+            det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
+            _worker_mesh_cache[name] = {'hash': h, 'islands': islands,
+                                        'det_islands': det_islands}
         else:
             cached = _worker_mesh_cache.get(name)
             if not cached or cached['hash'] != h:
-                print(f"[UVO] Worker error: cache miss for {name} hash={h}", file=sys.stderr)
-                islands = []
+                _wlog(f"job {job_id}: cache miss for '{name}' hash={h}")
+                islands     = []
                 det_islands = []
             else:
-                islands = cached['islands']
+                islands     = cached['islands']
                 det_islands = cached['det_islands']
 
         objects.append({
@@ -136,10 +139,19 @@ def _handle_classify_all(job, ix):
             'prev_self':   od.get('prev_self', {}),
         })
 
-    # Self-classify each object
+    _wlog(f"job {job_id}: deserialize done {(time.perf_counter()-t0)*1000:.0f}ms "
+          f"— {len(objects)} objs tiled={tiled}")
+
+    # Self-classify each object 
     self_results = {}
     for obj in objects:
-        p  = obj['prev_self']
+        p    = obj['prev_self']
+        name = obj['name']
+        n_isl = len(obj['det_islands'])
+        _wlog(f"job {job_id}: SELF '{name}' ({n_isl} islands, "
+              f"has_prev={p.get('inter_idx') is not None})")
+        t1 = time.perf_counter()
+
         inter_idx, stack_idx, uv_kh, i_pairs, ikeys, pcache = ix.classify_islands(
             obj['det_islands'],
             prev_inter_idx   = p.get('inter_idx'),
@@ -149,10 +161,15 @@ def _handle_classify_all(job, ix):
             prev_island_keys = p.get('island_keys'),
             prev_pair_cache  = p.get('pair_cache'),
         )
-        self_results[obj['name']] = {
-            'uv_hash':    obj['hash'],
-            'inter_idx':  inter_idx,
-            'stack_idx':  stack_idx,
+
+        _wlog(f"job {job_id}: SELF done '{name}' "
+              f"{(time.perf_counter()-t1)*1000:.0f}ms — "
+              f"inter={len(inter_idx)} stack={len(stack_idx)}")
+
+        self_results[name] = {
+            'uv_hash':     obj['hash'],
+            'inter_idx':   inter_idx,
+            'stack_idx':   stack_idx,
             'uv_key_hash': uv_kh,
             'inter_pairs': i_pairs,
             'island_keys': ikeys,
@@ -168,6 +185,10 @@ def _handle_classify_all(job, ix):
             na, nb = oa['name'], ob['name']
             pair_key = (na, nb) if na <= nb else (nb, na)
             p = cross_prev.get(pair_key, {})
+            _wlog(f"job {job_id}: CROSS '{na}'({len(oa['det_islands'])}) x "
+                  f"'{nb}'({len(ob['det_islands'])}) "
+                  f"has_prev={p.get('inter_a') is not None}")
+            t2 = time.perf_counter()
 
             r_a, r_b, s_a, s_b, uv_h, i_pairs, ckeys_a, ckeys_b, cpcache = \
                 ix.classify_islands_cross(
@@ -182,36 +203,42 @@ def _handle_classify_all(job, ix):
                     prev_island_keys_b = p.get('island_keys_b'),
                     prev_pair_cache    = p.get('pair_cache'),
                 )
+
+            _wlog(f"job {job_id}: CROSS done '{na}'x'{nb}' "
+                  f"{(time.perf_counter()-t2)*1000:.0f}ms — "
+                  f"inter_a={len(r_a)} inter_b={len(r_b)}")
+
             cross_results[pair_key] = {
                 'ha': oa['hash'], 'hb': ob['hash'],
                 'inter_a': r_a,   'inter_b': r_b,
                 'stack_a': s_a,   'stack_b': s_b,
                 'uv_hash': uv_h,  'inter_pairs': i_pairs,
                 'island_keys_a': ckeys_a, 'island_keys_b': ckeys_b,
-                'pair_cache': cpcache,
+                'pair_cache':    cpcache,
             }
 
+    _wlog(f"job {job_id}: COMPLETE {(time.perf_counter()-t0)*1000:.0f}ms total")
+
     return {
-        'id':           job.get('id'),
-        'type':         'classify_all_result',
-        'self_results': self_results,
+        'id':            job_id,
+        'type':          'classify_all_result',
+        'self_results':  self_results,
         'cross_results': cross_results,
     }
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# Main loop
 
 def _process_job(job, ix):
-    job_id   = job.get('id')
     job_type = job.get('type')
 
     if job_type == 'ping':
-        return {'id': job_id, 'type': 'pong'}
+        return {'id': job.get('id'), 'type': 'pong'}
 
     if job_type == 'classify_all':
         return _handle_classify_all(job, ix)
 
-    return {'id': job_id, 'type': 'error', 'msg': f'unknown: {job_type!r}'}
+    return {'id': job.get('id'), 'type': 'error', 'msg': f'unknown: {job_type!r}'}
 
 
 def main():
@@ -222,34 +249,80 @@ def main():
     if addon_dir not in sys.path:
         sys.path.insert(0, addon_dir)
 
-    # Import intersect once — stays loaded for the lifetime of the process.
+    # Per-session log — PID in filename so parallel sessions don't clobber each other.
+    pid = os.getpid()
+    global _LOG_PATH
+    _LOG_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), f"uvo_worker_{pid}.log")
+    try:
+        with open(_LOG_PATH, "w", encoding="utf-8") as f:
+            f.write(f"=== UVO worker started pid={pid} ===\n")
+        with open(os.path.join(os.environ.get("TEMP", "/tmp"),
+                               "uvo_worker_latest.log.pid"), "w") as f:
+            f.write(_LOG_PATH)
+    except Exception:
+        pass
+
+    _wlog(f"addon_dir={addon_dir}")
+
     try:
         import intersect as ix
+        _wlog("intersect imported OK")
     except ImportError as e:
-        # Fallback: try as a package submodule name
-        ix = None
+        ix      = None
         _ix_err = str(e)
+        _wlog(f"intersect import FAILED: {e}")
 
-    stdin  = sys.stdin.buffer
-    stdout = ipc_out
+    stdin = sys.stdin.buffer
 
     while True:
         job = _read_job(stdin)
         if job is None:
+            _wlog("stdin EOF — exiting")
             break
 
-        try:
-            if ix is None:
-                result = {'id': job.get('id'), 'type': 'error',
-                          'msg': f'intersect import failed: {_ix_err}'}
-            else:
-                result = _process_job(job, ix)
-        except Exception as e:
-            import traceback
-            result = {'id': job.get('id'), 'type': 'error',
-                      'msg': str(e), 'tb': traceback.format_exc()}
+        job_id   = job.get('id', '?')
+        job_type = job.get('type', '?')
+        _wlog(f"received job id={job_id} type={job_type!r}")
 
-        _write_result(stdout, result)
+        # Hard timeout — hung classify exits the process so __init__.py can restart
+        result_box = [None]
+        error_box  = [None]
+
+        def _run():
+            try:
+                if ix is None:
+                    result_box[0] = {'id': job_id, 'type': 'error',
+                                     'msg': f'intersect import failed: {_ix_err}'}
+                else:
+                    result_box[0] = _process_job(job, ix)
+            except Exception as e:
+                import traceback
+                error_box[0] = (str(e), traceback.format_exc())
+
+        t       = threading.Thread(target=_run, daemon=True)
+        t_start = time.perf_counter()
+        t.start()
+        t.join(timeout=JOB_TIMEOUT_SECS)
+
+        if t.is_alive():
+            elapsed = time.perf_counter() - t_start
+            msg = (f"TIMEOUT: job id={job_id} type={job_type!r} "
+                   f"hung {elapsed:.1f}s — worker exiting for restart")
+            _wlog(f"*** {msg} ***")
+            try:
+                _write_result(ipc_out, {'id': job_id, 'type': 'error', 'msg': msg})
+            except Exception:
+                pass
+            sys.exit(1)   # triggers restart in __init__.send_job
+
+        if error_box[0]:
+            err_msg, tb = error_box[0]
+            _wlog(f"job {job_id} ERROR: {err_msg}")
+            _write_result(ipc_out, {
+                'id': job_id, 'type': 'error', 'msg': err_msg, 'tb': tb
+            })
+        else:
+            _write_result(ipc_out, result_box[0])
 
 
 if __name__ == '__main__':

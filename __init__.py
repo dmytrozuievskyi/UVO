@@ -7,15 +7,15 @@ import subprocess
 import sys
 import threading
 
-# ── Background worker process ─────────────────────────────────────────────────
+# Background worker process
 # Uses subprocess.Popen + stdin/stdout pipes with length-prefixed pickle frames.
 # This avoids multiprocessing module-name-resolution issues in Blender extensions.
 
 _worker_process  = None    # subprocess.Popen
 _worker_lock     = threading.Lock()
 _next_job_id     = 0
-_result_queue    = _queue_mod.Queue()  # worker results arrive here
-_reader_thread   = None                # background thread reading worker stdout
+_result_queue    = None   # Queue created fresh on each start_worker() — clears stale results
+_reader_thread   = None   # background thread reading worker stdout
 _classify_generation = 0              # incremented each time a new classify job is sent
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
 
@@ -52,6 +52,10 @@ def send_job(job):
     """Send a job to the worker. Returns False if worker not running."""
     proc = _worker_process
     if proc is None or proc.poll() is not None:
+        # Worker is dead — restart it for the next call, bail for this one.
+        if proc is not None:
+            print(f"[UVO] Worker died (exit={proc.poll()}) — restarting")
+        start_worker()
         return False
     try:
         with _worker_lock:
@@ -64,6 +68,8 @@ def send_job(job):
 
 def read_result_blocking(timeout=5.0):
     """Read one result from the result queue (blocking, for ping test)."""
+    if _result_queue is None:
+        raise TimeoutError("Worker not started")
     try:
         return _result_queue.get(timeout=timeout)
     except _queue_mod.Empty:
@@ -72,7 +78,7 @@ def read_result_blocking(timeout=5.0):
 
 
 def get_result_queue():
-    """Return the queue where worker results arrive."""
+    """Return the queue where worker results arrive. None if worker not started."""
     return _result_queue
 
 
@@ -130,12 +136,15 @@ def _start_stderr_reader(proc):
 
 def start_worker():
     """Spawn the background worker subprocess. Safe to call multiple times."""
-    global _worker_process
+    global _worker_process, _result_queue
 
     if _worker_process is not None and _worker_process.poll() is None:
         return   # already alive
 
     clear_synced_objects()
+
+    # Fresh queue on every start — flushes any stale results from the previous session.
+    _result_queue = _queue_mod.Queue()
 
     addon_dir  = os.path.dirname(os.path.abspath(__file__))
     worker_script = os.path.join(addon_dir, "worker.py")
