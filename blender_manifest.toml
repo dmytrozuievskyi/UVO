@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "uvo_overlays"
-version = "1.0.0"
+version = "1.1.0"
 
 name = "UVO"
 tagline = "Dynamic overlays for the UV Editor"
@@ -14,3 +14,18 @@ blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 website = "https://github.com/dmytrozuievskyi/UVO"
+
+[build]
+    paths_exclude_pattern = [
+    "__pycache__/",
+    "/.git/",
+    "/*.gitattributes",
+    "/*.gitignore",
+    "/*.md",
+    "/*.log",
+    "/*.diff",
+    "/*.tmp",
+    "/*.bat",
+    "/*.zip",
+    "images/"
+ ]

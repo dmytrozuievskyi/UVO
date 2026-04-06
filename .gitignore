@@ -1,3 +1,6 @@
 /__pycache__
 *.bat
 /images
+*.log
+*.diff
+*.zip
