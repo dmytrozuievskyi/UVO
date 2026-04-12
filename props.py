@@ -13,7 +13,7 @@ def _sync_draw(context):
         and space.overlay.show_overlays
     )
     addon_on   = not props.is_muted
-    any_active = props.show_uv_id or props.show_intersect or props.show_padding
+    any_active = props.show_uv_id or props.show_intersect or props.show_padding or props.show_stretch
 
     should_draw = native_on and addon_on and any_active
 
@@ -111,14 +111,26 @@ def update_padding_settings(self, context):
                 area.tag_redraw()
 
 
-def update_padding_res_x(self, context):
-    if self.padding_res_linked:
-        self.padding_res_y = self.padding_res_x
+def update_tex_res_x(self, context):
+    if self.tex_res_linked:
+        self.tex_res_y = self.tex_res_x
     update_padding_settings(self, context)
 
 
-def update_padding_res_y(self, context):
+def update_tex_res_y(self, context):
     update_padding_settings(self, context)
+
+
+def update_stretch(self, context):
+    _sync_draw(context)
+
+
+def update_stretch_opacity(self, context):
+    # Opacity-only change — no batch rebuild needed, just redraw.
+    if context.screen:
+        for area in context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                area.tag_redraw()
 
 
 class UVIDProperties(bpy.types.PropertyGroup):
@@ -206,24 +218,24 @@ class UVIDProperties(bpy.types.PropertyGroup):
         ('4096', "4096", ""),
         ('8192', "8192", ""),
     ]
-    padding_res_x: bpy.props.EnumProperty(
+    tex_res_x: bpy.props.EnumProperty(
         name="Width",
         items=TEXTURE_RES_ITEMS,
         default='2048',
-        description="Texture width used to calculate padding size in UV space",
-        update=update_padding_res_x,
+        description="Texture width (used by all overlays that work in pixel space)",
+        update=update_tex_res_x,
     )
-    padding_res_y: bpy.props.EnumProperty(
+    tex_res_y: bpy.props.EnumProperty(
         name="Height",
         items=TEXTURE_RES_ITEMS,
         default='2048',
-        description="Texture height used to calculate padding size in UV space",
-        update=update_padding_res_y,
+        description="Texture height (used by all overlays that work in pixel space)",
+        update=update_tex_res_y,
     )
-    padding_res_linked: bpy.props.BoolProperty(
+    tex_res_linked: bpy.props.BoolProperty(
         default=True,
         name="Link Resolutions",
-        description="Keep X and Y texture resolution in sync",
+        description="Keep texture width and height in sync",
         update=update_padding_settings,
     )
     padding_px: bpy.props.EnumProperty(
@@ -242,6 +254,54 @@ class UVIDProperties(bpy.types.PropertyGroup):
         default='4',
         description="Minimum padding distance between islands in pixels",
         update=update_padding_settings,
+    )
+
+    # ------------------------------------------------------------------
+    # Stretch overlay
+    # ------------------------------------------------------------------
+    show_stretch: bpy.props.BoolProperty(
+        default=False,
+        name="Stretch",
+        description="Visualize texel density deviation from a target value",
+        update=update_stretch,
+    )
+    stretch_mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=[
+            ('BOTH',    "Both",    "Show heatmap and checker grid simultaneously"),
+            ('HEATMAP', "Heatmap", "Smooth color gradient — blue (compressed) to red (stretched)"),
+            ('CHECKER', "Checker", "Warped grid that deforms with UV distortion"),
+        ],
+        default='BOTH',
+        description="Which visual layers to display for the stretch overlay",
+    )
+    stretch_opacity: bpy.props.FloatProperty(
+        default=0.8,
+        min=0.0,
+        max=1.0,
+        name="Opacity",
+        subtype='FACTOR',
+        description="Stretch overlay opacity",
+        update=update_stretch_opacity,
+    )
+    stretch_target_texel: bpy.props.FloatProperty(
+        default=0.0,
+        min=0.0,
+        name="Target Texel Density",
+        description=(
+            "Target texel density in px/m (Blender internal unit).\n"
+            "0 = abstract mode — distortion shown without a real-world density reference.\n"
+            "Use the droplet button to sample from a selected island"
+        ),
+    )
+    stretch_texel_unit: bpy.props.EnumProperty(
+        name="Unit",
+        items=[
+            ('PX_CM', "px/cm", "Display texel density in pixels per centimetre"),
+            ('PX_M',  "px/m",  "Display texel density in pixels per metre"),
+        ],
+        default='PX_CM',
+        description="Display unit for texel density — does not affect internal storage (always px/m)",
     )
 
 

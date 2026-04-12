@@ -309,8 +309,8 @@ def rebuild(props, obj_cache):
         return
 
     pad_px  = int(props.padding_px)
-    res_x   = int(props.padding_res_x)
-    res_y   = int(props.padding_res_y)
+    res_x   = int(props.tex_res_x)
+    res_y   = int(props.tex_res_y)
 
     # disp_res_y is aspect-adjusted for visual uniformity; detection uses real res_y.
     aspect     = _get_display_aspect()
