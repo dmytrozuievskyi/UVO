@@ -11,6 +11,7 @@ from . import utils
 from . import intersect as ix
 from . import offscreen
 from . import padding
+from . import stretch
 
 draw_handler   = None
 is_calculating = False
@@ -168,7 +169,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 
         obj_seed = utils.get_string_hash(obj.name)
         islands  = ix.extract_islands(
-            bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name
+            bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name, obj.matrix_world
         )
         utils.log("id_extract", (
             f"{obj.name}: {len(islands)} islands, "
@@ -1091,6 +1092,9 @@ def update_batches_safe(context):
         if any_changed and props.show_padding and not props.is_muted:
             _rebuild_padding_batches(props)
 
+        if any_changed and props.show_stretch and not props.is_muted:
+            stretch.rebuild(props, _obj_cache, context)
+
     except Exception as e:
         utils.log("update", f"error: {e}")
     finally:
@@ -1103,7 +1107,7 @@ def depsgraph_update_handler(scene, depsgraph):
     prop = getattr(scene, "uv_id_props", None)
     if not prop or prop.is_muted:
         return
-    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding:
+    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding and not prop.show_stretch:
         return
 
     if bpy.context.mode != 'EDIT_MESH':
@@ -1204,6 +1208,10 @@ def draw_callback():
             if padding.batches['bad']:
                 padding.batches['bad'].draw(shader)
 
+        # ── Pass 6: stretch overlay (checker + heatmap) ───────────────────────
+        if props.show_stretch:
+            stretch.draw(props, shader, bpy.context)
+
     except Exception as e:
         utils.log("draw", f"error: {e}")
         traceback.print_exc()
@@ -1236,6 +1244,7 @@ def unregister():
 
     offscreen.free()
     padding.clear()
+    stretch.clear()
 
     _obj_cache.clear()
     _isect_self_cache.clear()

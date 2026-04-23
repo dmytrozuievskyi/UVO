@@ -204,6 +204,9 @@ if "bpy" in locals():  # Support F8 / Reload Scripts
     importlib.reload(offscreen)
     importlib.reload(intersect)
     importlib.reload(padding)
+    importlib.reload(stretch_checker)
+    importlib.reload(stretch_heatmap)
+    importlib.reload(stretch)
     importlib.reload(props)
     importlib.reload(ops)
     importlib.reload(draw)
@@ -214,6 +217,9 @@ else:
     from . import offscreen
     from . import intersect
     from . import padding
+    from . import stretch_checker
+    from . import stretch_heatmap
+    from . import stretch
     from . import props
     from . import ops
     from . import draw

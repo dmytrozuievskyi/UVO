@@ -7,7 +7,7 @@ UV_DECIMAL = 3
 
 class Island:
     __slots__ = ('tris', 'aabb', 'uv_key', 'color', 'object_name',
-                 'boundary_segs', 'tri_centers')
+                 'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area')
 
     def __init__(self, tris, color, object_name=''):
         self.tris          = tris
@@ -15,6 +15,9 @@ class Island:
         self.object_name   = object_name
         self.uv_key        = None
         self.boundary_segs = []
+        self.jacobians     = []
+        self.uv_area       = 0.0
+        self.surface_area  = 0.0
 
         if tris:
             all_u = [v[0] for t in tris for v in t]
@@ -89,7 +92,7 @@ def _extract_boundary_segs(island_faces, face_index_set, uv_layer, uv_adj):
 
 
 def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
-                    object_name=''):
+                    object_name='', matrix_world=None):
     bm_copy.faces.ensure_lookup_table()
     uv_adj = _build_uv_adjacency(bm_copy, uv_layer)
 
@@ -127,10 +130,13 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
         )
 
         island_faces = [bm_copy.faces[i] for i in face_index_set]
-        tris = _fan_tris_from_faces(island_faces, uv_layer)
+        tris, jacobians, uv_area, surf_area = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
 
         if tris:
             isle               = Island(tris, col, object_name)
+            isle.jacobians     = jacobians
+            isle.uv_area       = uv_area
+            isle.surface_area  = surf_area
             isle.uv_key        = _island_uv_key(island_faces, uv_layer)
             isle.boundary_segs = _extract_boundary_segs(
                 island_faces, face_index_set, uv_layer, uv_adj
@@ -140,18 +146,86 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
     return islands
 
 
-def _fan_tris_from_faces(faces, uv_layer):
+def _fan_tris_and_data(faces, uv_layer, matrix_world):
     tris = []
+    jacobians = []
+    total_uv_area = 0.0
+    total_surf_area = 0.0
+
+    identity_j = (1.0, 0.0, 0.0, 1.0)
+    has_matrix = matrix_world is not None
+
     for face in faces:
         loops = face.loops
         if len(loops) < 3:
             continue
-        uv0 = (loops[0][uv_layer].uv.x, loops[0][uv_layer].uv.y)
+        l0 = loops[0]
+        uv0 = l0[uv_layer].uv
+        if has_matrix:
+            p0 = matrix_world @ l0.vert.co
+        else:
+            p0 = l0.vert.co
+
         for i in range(1, len(loops) - 1):
-            uv1 = (loops[i][uv_layer].uv.x,   loops[i][uv_layer].uv.y)
-            uv2 = (loops[i+1][uv_layer].uv.x, loops[i+1][uv_layer].uv.y)
-            tris.append((uv0, uv1, uv2))
-    return tris
+            l1 = loops[i]
+            l2 = loops[i + 1]
+            uv1 = l1[uv_layer].uv
+            uv2 = l2[uv_layer].uv
+            if has_matrix:
+                p1 = matrix_world @ l1.vert.co
+                p2 = matrix_world @ l2.vert.co
+            else:
+                p1 = l1.vert.co
+                p2 = l2.vert.co
+
+            # Save the triangle UVs
+            tris.append(((uv0.x, uv0.y), (uv1.x, uv1.y), (uv2.x, uv2.y)))
+
+            # UV area
+            eu = uv1 - uv0
+            ev = uv2 - uv0
+            det_uv = eu.x * ev.y - eu.y * ev.x
+            uv_area = abs(det_uv) * 0.5
+            total_uv_area += uv_area
+
+            # 3D area
+            dp1 = p1 - p0
+            dp2 = p2 - p0
+            surf_area = dp1.cross(dp2).length * 0.5
+            total_surf_area += surf_area
+
+            # Jacobian computation
+            if abs(det_uv) < 1e-12:
+                jacobians.append(identity_j)
+                continue
+
+            inv_det = 1.0 / det_uv
+            Tu = (dp1 * ev.y - dp2 * eu.y) * inv_det
+            Tv = (dp2 * eu.x - dp1 * ev.x) * inv_det
+
+            E = Tu.dot(Tu)
+            F = Tu.dot(Tv)
+            G = Tv.dot(Tv)
+
+            D = E * G - F * F
+            if D < 1e-12:
+                jacobians.append(identity_j)
+                continue
+
+            s = math.sqrt(D)
+            t_sq = E + G + 2 * s
+            if t_sq < 1e-12:
+                jacobians.append(identity_j)
+                continue
+
+            t = math.sqrt(t_sq)
+            M00 = (E + s) / t
+            M01 = F / t
+            M10 = F / t
+            M11 = (G + s) / t
+            jacobians.append((M00, M01, M10, M11))
+
+    return tris, jacobians, total_uv_area, total_surf_area
 
 
 def _island_uv_key(faces, uv_layer):
