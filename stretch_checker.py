@@ -242,7 +242,53 @@ def build_geometry_batch(obj_cache, props):
                             w_dict[nbr] = (w_n_u, w_n_v)
                             queue.append(nbr)
 
-            # 5. Output batch data
+            # 5. Gauss-Seidel Relaxation (Poisson Solver)
+            if root_key and len(w_dict) > 1:
+                # Precompute target vectors for each edge
+                adj_targets = {}
+                for curr in w_dict:
+                    edges = []
+                    area_c = vert_area_sum[curr]
+                    Mc = [m / area_c for m in vert_M_sum[curr]] if area_c > 1e-8 else [1.0, 0.0, 0.0, 1.0]
+
+                    for nbr in adj.get(curr, []):
+                        if nbr in w_dict:
+                            area_n = vert_area_sum[nbr]
+                            Mn = [m / area_n for m in vert_M_sum[nbr]] if area_n > 1e-8 else [1.0, 0.0, 0.0, 1.0]
+
+                            M00 = (Mc[0] + Mn[0]) * 0.5 * scale
+                            M01 = (Mc[1] + Mn[1]) * 0.5 * scale
+                            M10 = (Mc[2] + Mn[2]) * 0.5 * scale
+                            M11 = (Mc[3] + Mn[3]) * 0.5 * scale
+
+                            # Target vector is from nbr to curr
+                            du = curr[0] - nbr[0]
+                            dv = curr[1] - nbr[1]
+                            t_u = M00 * du + M01 * dv
+                            t_v = M10 * du + M11 * dv
+                            
+                            edges.append((nbr, t_u, t_v))
+                    
+                    if edges:
+                        adj_targets[curr] = edges
+
+                # Relax for 20 iterations to smooth curl error across all edges
+                for _ in range(20):
+                    for curr, edges in adj_targets.items():
+                        if curr == root_key:
+                            continue  # Keep the center pivot pinned to prevent drift
+                        
+                        sum_u = 0.0
+                        sum_v = 0.0
+                        for (nbr, tu, tv) in edges:
+                            w_nbr = w_dict[nbr]
+                            sum_u += w_nbr[0] + tu
+                            sum_v += w_nbr[1] + tv
+                        
+                        deg = len(edges)
+                        w_dict[curr] = (sum_u / deg, sum_v / deg)
+
+            # 6. Output batch data
             for i, tri in enumerate(isle.tris):
                 for u, v in tri:
                     key = (round(u, 5), round(v, 5))
