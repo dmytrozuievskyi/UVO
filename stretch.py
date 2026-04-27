@@ -17,7 +17,8 @@ from . import stretch_heatmap
 # ---------------------------------------------------------------------------
 # Module state
 # ---------------------------------------------------------------------------
-_geo_batch = None   # position-only TRIS batch (rebuilt on island geometry change)
+_geo_batch = None       # position-only TRIS batch for checker
+_heatmap_batch = None   # color-per-vertex TRIS batch for heatmap
 
 
 # ---------------------------------------------------------------------------
@@ -25,41 +26,44 @@ _geo_batch = None   # position-only TRIS batch (rebuilt on island geometry chang
 # ---------------------------------------------------------------------------
 
 def rebuild(props, obj_cache, context):
-    """Rebuild the geometry batch from current island data.
+    """Rebuild the geometry batches from current island data.
 
-    Called from draw.py whenever island UV geometry has changed (same
-    trigger path as padding.rebuild). Zoom does not trigger this rebuild.
+    Called from draw.py whenever island UV geometry has changed.
     """
-    global _geo_batch
+    global _geo_batch, _heatmap_batch
     _geo_batch = stretch_checker.build_geometry_batch(obj_cache, props)
-    # Phase 4: add heatmap batch here
+    _heatmap_batch = stretch_heatmap.build_geometry_batch(obj_cache, props)
 
 
 def draw(props, shader, context):
     """Draw stretch overlay layers.
 
-    'shader' is the outer SMOOTH_COLOR shader (not used by the checker —
-    the checker binds its own custom shader). Re-binding the outer shader
-    after this call is not needed since stretch is the last draw pass.
-
     Mode routing:
-      BOTH    → checker + heatmap (heatmap stub = no-op until Phase 4)
+      BOTH    → heatmap drawn solid, checker drawn with transparency on top
       CHECKER → checker only
-      HEATMAP → heatmap only (no-op until Phase 4)
+      HEATMAP → heatmap only
     """
     mode    = props.stretch_mode
     opacity = props.stretch_opacity
 
-    if mode in ('BOTH', 'CHECKER'):
-        # divisions uniform is set fresh each frame from zoom — no rebuild
-        stretch_checker.draw(_geo_batch, opacity, context)
-
-    if mode in ('BOTH', 'HEATMAP'):
-        pass   # Phase 4
+    if mode == 'HEATMAP':
+        if _heatmap_batch:
+            stretch_heatmap.draw(_heatmap_batch, opacity)
+    elif mode == 'CHECKER':
+        if _geo_batch:
+            stretch_checker.draw(_geo_batch, opacity, context)
+    elif mode == 'BOTH':
+        if _heatmap_batch:
+            stretch_heatmap.draw(_heatmap_batch, opacity)
+        if _geo_batch:
+            # both_mode=True outputs transparent white/black instead of solid gray
+            stretch_checker.draw(_geo_batch, opacity, context, both_mode=True)
 
 
 def clear():
     """Release GPU resources. Called on unregister."""
-    global _geo_batch
+    global _geo_batch, _heatmap_batch
     _geo_batch = None
+    _heatmap_batch = None
     stretch_checker.clear()
+    stretch_heatmap.clear()

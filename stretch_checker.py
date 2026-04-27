@@ -76,12 +76,22 @@ void main() {
     int iv   = int(mod(floor(uvCoord.y * d), 2.0));
     int cell = (iu + iv) % 2;
 
-    // Linear-space colours: #373737 (dark) and #555555 (light)
     vec3 colDark  = vec3(0.0453, 0.0453, 0.0453);
     vec3 colLight = vec3(0.1008, 0.1008, 0.1008);
     vec3 col = (cell == 1) ? colLight : colDark;
+    float alpha = opacity;
 
-    fragColor = vec4(col, opacity);
+    if (both_mode == 1) {
+        if (cell == 1) {
+            col = vec3(1.0, 1.0, 1.0);
+            alpha = opacity * 0.2;
+        } else {
+            col = vec3(0.0, 0.0, 0.0);
+            alpha = opacity * 0.5;
+        }
+    }
+
+    fragColor = vec4(col, alpha);
 }
 """
 
@@ -101,6 +111,7 @@ def _get_shader():
         info.push_constant('MAT4',  "ModelViewProjectionMatrix")
         info.push_constant('FLOAT', "opacity")
         info.push_constant('INT',   "divisions")
+        info.push_constant('INT',   "both_mode")
         info.vertex_in(0, 'VEC3', "pos")
         info.vertex_in(1, 'VEC2', "warpedUV")
         info.vertex_out(vert_out)
@@ -310,7 +321,9 @@ def build_geometry_batch(obj_cache, props):
             "warpedUV": warped_uvs
         })
     except Exception as e:
+        import traceback
         print(f"[UVO] stretch_checker batch error: {e}")
+        traceback.print_exc()
         return None
 
 
@@ -318,12 +331,11 @@ def build_geometry_batch(obj_cache, props):
 # Draw — called every frame
 # ---------------------------------------------------------------------------
 
-def draw(batch, opacity, context):
-    """Draw the checker grid.
+_draw_error_printed = False
 
-    divisions is computed fresh from the current zoom every frame —
-    no batch rebuild needed when the user scrolls.
-    """
+def draw(batch, opacity, context, both_mode=False):
+    """Draw the checker grid."""
+    global _draw_error_printed
     if batch is None:
         return
 
@@ -338,9 +350,14 @@ def draw(batch, opacity, context):
         shader.bind()
         shader.uniform_float("opacity",    opacity)
         shader.uniform_int(  "divisions",  divisions)
+        shader.uniform_int(  "both_mode",  1 if both_mode else 0)
         batch.draw(shader)
     except Exception as e:
-        print(f"[UVO] stretch_checker draw error: {e}")
+        if not _draw_error_printed:
+            import traceback
+            print(f"[UVO] stretch_checker draw error: {e}")
+            traceback.print_exc()
+            _draw_error_printed = True
 
 
 # ---------------------------------------------------------------------------
