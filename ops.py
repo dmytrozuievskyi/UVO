@@ -44,17 +44,32 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         # ----------------------------------------------------------------
         # Phase 1 stub — real Jacobian-based calculation comes in Phase 2+.
         # ----------------------------------------------------------------
-        props = context.scene.uv_id_props
+        if not context.active_object:
+            return {'CANCELLED'}
+            
+        obj_props = context.active_object.uv_id_props
 
         try:
-            density_px_per_m = self._sample(context, props)
+            density_px_per_m = self._sample(context, obj_props)
         except Exception as exc:
             self.report({'WARNING'}, f"Sample failed: {exc}")
             return {'CANCELLED'}
 
-        props.stretch_target_texel = density_px_per_m
-        unit_label = "px/cm" if props.stretch_texel_unit == 'PX_CM' else "px/m"
-        display_val = density_px_per_m / 100.0 if props.stretch_texel_unit == 'PX_CM' else density_px_per_m
+        # Save internal density
+        obj_props.stretch_internal_texel = density_px_per_m
+        
+        # Auto-switch unit for readability
+        if density_px_per_m >= 1000.0:
+            obj_props.stretch_texel_unit = 'PX_CM'
+            obj_props.stretch_target_texel = density_px_per_m / 100.0
+            display_val = density_px_per_m / 100.0
+            unit_label = "px/cm"
+        else:
+            obj_props.stretch_texel_unit = 'PX_M'
+            obj_props.stretch_target_texel = density_px_per_m
+            display_val = density_px_per_m
+            unit_label = "px/m"
+            
         self.report({'INFO'}, f"Sampled: {display_val:.1f} {unit_label}")
         return {'FINISHED'}
 

@@ -214,18 +214,20 @@ def _zones_collide(off_a, off_b):
     return False
 
 
-def _find_bad_islands(islands, res_x, res_y, pad_px, shared_seg_cache=None):
+def _find_bad_islands(islands_data, pad_px, shared_seg_cache=None):
     """Return set of island indices whose padding zones overlap.
 
     shared_seg_cache: pre-computed {index: segs} reused when display and
     detection resolution match (square textures), avoiding redundant work.
     """
-    pad_u = pad_px / res_x
-    pad_v = pad_px / res_y
-    n     = len(islands)
+    n     = len(islands_data)
 
     # Phase 1: spatial grid cull on expanded AABBs.
-    exp_aabbs = [_expanded_aabb(isle, pad_u, pad_v) for isle in islands]
+    exp_aabbs = []
+    for isle, res_x, res_y in islands_data:
+        pad_u = pad_px / res_x
+        pad_v = pad_px / res_y
+        exp_aabbs.append(_expanded_aabb(isle, pad_u, pad_v))
 
     if n > 1:
         diags = sorted(
@@ -266,7 +268,8 @@ def _find_bad_islands(islands, res_x, res_y, pad_px, shared_seg_cache=None):
         if shared_seg_cache is not None and i in shared_seg_cache:
             return shared_seg_cache[i]
         if i not in off_cache:
-            off_cache[i] = _offset_segs(islands[i], res_x, res_y, pad_px)
+            isle, res_x, res_y = islands_data[i]
+            off_cache[i] = _offset_segs(isle, res_x, res_y, pad_px)
         return off_cache[i]
 
     bad = set()
@@ -309,12 +312,7 @@ def rebuild(props, obj_cache):
         return
 
     pad_px  = int(props.padding_px)
-    res_x   = int(props.tex_res_x)
-    res_y   = int(props.tex_res_y)
-
-    # disp_res_y is aspect-adjusted for visual uniformity; detection uses real res_y.
-    aspect     = _get_display_aspect()
-    disp_res_y = res_y / aspect if aspect > 0 else res_y
+    aspect  = _get_display_aspect()
 
     col_ok  = (0.0, 1.0, 0.0, _PADDING_OPACITY)
     col_bad = (1.0, 0.0, 0.0, _PADDING_OPACITY)
@@ -327,24 +325,30 @@ def rebuild(props, obj_cache):
             cv += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
             cl += [col, col]
 
-    all_islands = [
-        isle
-        for cache in obj_cache.values()
-        if cache.get('islands')
-        for isle in cache['islands']
-    ]
+    all_islands_data = []
+    for cache in obj_cache.values():
+        islands = cache.get('islands')
+        if not islands:
+            continue
+        tex_w = cache.get('tex_w', 1024)
+        tex_h = cache.get('tex_h', 1024)
+        for isle in islands:
+            all_islands_data.append((isle, tex_w, tex_h))
 
-    # On square textures disp_res_y == res_y, so display segs double as detection segs.
-    disp_segs = {i: _offset_segs(isle, res_x, disp_res_y, pad_px)
-                 for i, isle in enumerate(all_islands)}
+    disp_segs = {}
+    square_textures = True
+    for i, (isle, res_x, res_y) in enumerate(all_islands_data):
+        disp_res_y = res_y / aspect if aspect > 0 else res_y
+        disp_segs[i] = _offset_segs(isle, res_x, disp_res_y, pad_px)
+        if abs(aspect - 1.0) > 1e-4:
+            square_textures = False
 
-    square = abs(aspect - 1.0) < 1e-4
     bad_idx = _find_bad_islands(
-        all_islands, res_x, res_y, pad_px,
-        shared_seg_cache=disp_segs if square else None
+        all_islands_data, pad_px,
+        shared_seg_cache=disp_segs if square_textures else None
     )
 
-    for i, isle in enumerate(all_islands):
+    for i, (isle, res_x, res_y) in enumerate(all_islands_data):
         segs = disp_segs[i]
         if i in bad_idx:
             _add(segs, col_bad, bad_coords, bad_colors)

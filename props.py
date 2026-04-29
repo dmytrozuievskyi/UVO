@@ -103,8 +103,9 @@ def update_padding(self, context):
 
 def update_padding_settings(self, context):
     from . import draw
-    if self.show_padding and not self.is_muted:
-        draw._rebuild_padding_batches(self)
+    props = context.scene.uv_id_props
+    if props.show_padding and not props.is_muted:
+        draw._rebuild_padding_batches(props)
     if context.screen:
         for area in context.screen.areas:
             if area.type == 'IMAGE_EDITOR':
@@ -115,10 +116,32 @@ def update_tex_res_x(self, context):
     if self.tex_res_linked:
         self.tex_res_y = self.tex_res_x
     update_padding_settings(self, context)
+    
+    # Update stretch overlay
+    props = context.scene.uv_id_props
+    if props.show_stretch:
+        from . import draw, stretch
+        for obj in context.scene.objects:
+            if obj.name in draw._obj_cache and hasattr(obj, 'uv_id_props'):
+                draw._obj_cache[obj.name]['tex_w'] = float(obj.uv_id_props.tex_res_x)
+                draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
+        stretch.rebuild(props, draw._obj_cache, context)
+        draw.tag_redraw(context)
 
 
 def update_tex_res_y(self, context):
     update_padding_settings(self, context)
+    
+    # Update stretch overlay
+    props = context.scene.uv_id_props
+    if props.show_stretch:
+        from . import draw, stretch
+        for obj in context.scene.objects:
+            if obj.name in draw._obj_cache and hasattr(obj, 'uv_id_props'):
+                draw._obj_cache[obj.name]['tex_w'] = float(obj.uv_id_props.tex_res_x)
+                draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
+        stretch.rebuild(props, draw._obj_cache, context)
+        draw.tag_redraw(context)
 
 
 def update_stretch(self, context):
@@ -131,6 +154,117 @@ def update_stretch_opacity(self, context):
         for area in context.screen.areas:
             if area.type == 'IMAGE_EDITOR':
                 area.tag_redraw()
+
+
+_is_updating_texel = False
+_texel_timer_fn = None
+
+def _do_texel_update():
+    global _texel_timer_fn
+    _texel_timer_fn = None
+    if bpy.context:
+        from . import draw, stretch
+        props = bpy.context.scene.uv_id_props
+        
+        # Update cache so stretch reads the latest object properties
+        for obj in bpy.context.scene.objects:
+            if obj.name in draw._obj_cache and hasattr(obj, 'uv_id_props'):
+                draw._obj_cache[obj.name]['tex_w'] = float(obj.uv_id_props.tex_res_x)
+                draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
+                draw._obj_cache[obj.name]['target_texel'] = float(obj.uv_id_props.stretch_internal_texel)
+                
+        # Force stretch to rebuild with new values
+        stretch.rebuild(props, draw._obj_cache, bpy.context)
+        draw.tag_redraw(bpy.context)
+    return None
+
+def update_stretch_target_texel(self, context):
+    global _is_updating_texel, _texel_timer_fn
+    if _is_updating_texel:
+        return
+    
+    _is_updating_texel = True
+    try:
+        val = self.stretch_target_texel
+        if self.stretch_texel_unit == 'PX_CM':
+            self.stretch_internal_texel = val * 100.0
+        else:
+            self.stretch_internal_texel = val
+            
+        if _texel_timer_fn is not None:
+            bpy.app.timers.unregister(_texel_timer_fn)
+        _texel_timer_fn = _do_texel_update
+        bpy.app.timers.register(_texel_timer_fn, first_interval=0.2)
+    finally:
+        _is_updating_texel = False
+
+def update_stretch_texel_unit(self, context):
+    global _is_updating_texel
+    if _is_updating_texel:
+        return
+        
+    _is_updating_texel = True
+    try:
+        internal = self.stretch_internal_texel
+        if self.stretch_texel_unit == 'PX_CM':
+            self.stretch_target_texel = internal / 100.0
+        else:
+            self.stretch_target_texel = internal
+    finally:
+        _is_updating_texel = False
+
+class UVO_ObjectProperties(bpy.types.PropertyGroup):
+    TEXTURE_RES_ITEMS = [
+        ('256',  "256",  ""),
+        ('512',  "512",  ""),
+        ('1024', "1024", ""),
+        ('2048', "2048", ""),
+        ('4096', "4096", ""),
+        ('8192', "8192", ""),
+    ]
+    tex_res_x: bpy.props.EnumProperty(
+        name="Width",
+        items=TEXTURE_RES_ITEMS,
+        default='2048',
+        description="Texture width (used by all overlays that work in pixel space)",
+        update=update_tex_res_x,
+    )
+    tex_res_y: bpy.props.EnumProperty(
+        name="Height",
+        items=TEXTURE_RES_ITEMS,
+        default='2048',
+        description="Texture height (used by all overlays that work in pixel space)",
+        update=update_tex_res_y,
+    )
+    tex_res_linked: bpy.props.BoolProperty(
+        default=True,
+        name="Link Resolutions",
+        description="Keep texture width and height in sync",
+        update=update_tex_res_x,
+    )
+
+    stretch_internal_texel: bpy.props.FloatProperty(
+        default=0.0,
+        min=0.0,
+        description="Internal Texel Density (ALWAYS stored in px/m)",
+    )
+    stretch_target_texel: bpy.props.FloatProperty(
+        default=0.0,
+        min=0.0,
+        name="Density",
+        description="Target Texel Density",
+        update=update_stretch_target_texel,
+    )
+    stretch_texel_unit: bpy.props.EnumProperty(
+        name="Unit",
+        items=[
+            ('PX_M',  "px/m",  "Pixels per Meter"),
+            ('PX_CM', "px/cm", "Pixels per Centimeter"),
+        ],
+        default='PX_M',
+        description="Display unit for Texel Density",
+        update=update_stretch_texel_unit,
+    )
 
 
 class UVIDProperties(bpy.types.PropertyGroup):
@@ -210,34 +344,6 @@ class UVIDProperties(bpy.types.PropertyGroup):
                     "areas overlap, indicating potential mipmap bleed",
         update=update_padding,
     )
-    TEXTURE_RES_ITEMS = [
-        ('256',  "256",  ""),
-        ('512',  "512",  ""),
-        ('1024', "1024", ""),
-        ('2048', "2048", ""),
-        ('4096', "4096", ""),
-        ('8192', "8192", ""),
-    ]
-    tex_res_x: bpy.props.EnumProperty(
-        name="Width",
-        items=TEXTURE_RES_ITEMS,
-        default='2048',
-        description="Texture width (used by all overlays that work in pixel space)",
-        update=update_tex_res_x,
-    )
-    tex_res_y: bpy.props.EnumProperty(
-        name="Height",
-        items=TEXTURE_RES_ITEMS,
-        default='2048',
-        description="Texture height (used by all overlays that work in pixel space)",
-        update=update_tex_res_y,
-    )
-    tex_res_linked: bpy.props.BoolProperty(
-        default=True,
-        name="Link Resolutions",
-        description="Keep texture width and height in sync",
-        update=update_padding_settings,
-    )
     padding_px: bpy.props.EnumProperty(
         name="Padding",
         items=[
@@ -284,34 +390,18 @@ class UVIDProperties(bpy.types.PropertyGroup):
         description="Stretch overlay opacity",
         update=update_stretch_opacity,
     )
-    stretch_target_texel: bpy.props.FloatProperty(
-        default=0.0,
-        min=0.0,
-        name="Target Texel Density",
-        description=(
-            "Target texel density in px/m (Blender internal unit).\n"
-            "0 = abstract mode — distortion shown without a real-world density reference.\n"
-            "Use the droplet button to sample from a selected island"
-        ),
-    )
-    stretch_texel_unit: bpy.props.EnumProperty(
-        name="Unit",
-        items=[
-            ('PX_CM', "px/cm", "Display texel density in pixels per centimetre"),
-            ('PX_M',  "px/m",  "Display texel density in pixels per metre"),
-        ],
-        default='PX_CM',
-        description="Display unit for texel density — does not affect internal storage (always px/m)",
-    )
 
 
 def register():
     try:
         bpy.utils.unregister_class(UVIDProperties)
+        bpy.utils.unregister_class(UVO_ObjectProperties)
     except RuntimeError:
         pass
     bpy.utils.register_class(UVIDProperties)
+    bpy.utils.register_class(UVO_ObjectProperties)
     bpy.types.Scene.uv_id_props = bpy.props.PointerProperty(type=UVIDProperties)
+    bpy.types.Object.uv_id_props = bpy.props.PointerProperty(type=UVO_ObjectProperties)
 
 
 def unregister():
@@ -320,6 +410,11 @@ def unregister():
     except AttributeError:
         pass
     try:
+        del bpy.types.Object.uv_id_props
+    except AttributeError:
+        pass
+    try:
         bpy.utils.unregister_class(UVIDProperties)
+        bpy.utils.unregister_class(UVO_ObjectProperties)
     except RuntimeError:
         pass

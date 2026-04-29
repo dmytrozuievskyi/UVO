@@ -1070,6 +1070,9 @@ def update_batches_safe(context):
                     'islands':   new_islands,
                     'id_coords': new_id_coords,   # raw (x,y,z) list — used by _rebuild_id_opacity
                     'id_rgba':   new_id_rgba,     # raw (r,g,b,a) list — alpha swapped on opacity change
+                    'tex_w':     float(obj.uv_id_props.tex_res_x),
+                    'tex_h':     float(obj.uv_id_props.tex_res_y),
+                    'target_texel': float(obj.uv_id_props.stretch_internal_texel),
                 }
                 # Do NOT pop _isect_self_cache or _isect_cross_cache here!
                 # The worker needs the previous cache state to do per-island pair-cache diffs.
@@ -1118,6 +1121,7 @@ def depsgraph_update_handler(scene, depsgraph):
             _intersect_batches['hatch']   = None
             _intersect_batches['checker'] = None
             padding.clear()
+            stretch.clear()
         # Clear tris and mark dirty so the red fill disappears on leaving edit mode.
         global _inter_island_tris
         _inter_island_tris = []
@@ -1132,8 +1136,15 @@ def depsgraph_update_handler(scene, depsgraph):
             pass
         return
 
-    if not any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
-               for u in depsgraph.updates):
+    # If the cache is empty but we are in edit mode and overlays are enabled,
+    # it means we just entered edit mode (or just enabled an overlay).
+    # We must force a rebuild even if is_updated_geometry is false.
+    force_rebuild = False
+    if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch):
+        force_rebuild = True
+
+    if not force_rebuild and not any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
+                                     for u in depsgraph.updates):
         return
 
     def _do_rebuild():
@@ -1175,7 +1186,12 @@ def draw_callback():
         gpu.state.depth_test_set('NONE')
         shader.bind()
 
-        # ── Pass 1: UV ID color fill ──────────────────────────────────────────
+        # ── Pass 1: stretch overlay (checker + heatmap) ───────────────────────
+        if props.show_stretch:
+            stretch.draw(props, shader, bpy.context)
+            shader.bind() # restore shader in case stretch changed it
+
+        # ── Pass 2: UV ID color fill ──────────────────────────────────────────
         if props.show_uv_id:
             for cache in _obj_cache.values():
                 b = cache.get('id_batch')
@@ -1183,16 +1199,16 @@ def draw_callback():
                     b.draw(shader)
 
         if props.show_intersect:
-            # ── Pass 2: hatch on intersecting islands ─────────────────────────
+            # ── Pass 3: hatch on intersecting islands ─────────────────────────
             gpu.state.line_width_set(2.0)
             if _intersect_batches['hatch']:
                 _intersect_batches['hatch'].draw(shader)
 
-            # ── Pass 3: cross-hatch on stacked islands ────────────────────────
+            # ── Pass 4: cross-hatch on stacked islands ────────────────────────
             if _intersect_batches['checker']:
                 _intersect_batches['checker'].draw(shader)
 
-            # ── Pass 4: offscreen overlap fill (always drawn if intersections exist) ──
+            # ── Pass 5: offscreen overlap fill (always drawn if intersections exist) ──
             if _inter_island_tris:
                 utils.log("pass4", f"tris={len(_inter_island_tris)}")
                 if offscreen.check_view_matrix():
@@ -1201,16 +1217,12 @@ def draw_callback():
                 offscreen.composite(props.intersect_opacity, _inter_threshold)
                 shader.bind()  # restore after offscreen composite
 
-        # ── Pass 5: padding outlines ──────────────────────────────────────────
+        # ── Pass 6: padding outlines ──────────────────────────────────────────
         if props.show_padding:
             if padding.batches['ok']:
                 padding.batches['ok'].draw(shader)
             if padding.batches['bad']:
                 padding.batches['bad'].draw(shader)
-
-        # ── Pass 6: stretch overlay (checker + heatmap) ───────────────────────
-        if props.show_stretch:
-            stretch.draw(props, shader, bpy.context)
 
     except Exception as e:
         utils.log("draw", f"error: {e}")

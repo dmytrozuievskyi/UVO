@@ -30,15 +30,22 @@ from gpu_extras.batch import batch_for_shader
 # min(zoom_x, zoom_y) — subdivide only when both axes justify it.
 
 _ZOOM_THRESHOLDS = [2.0, 4.0, 8.0, 16.0]   # boundaries between levels 1–5
-_ZOOM_DIVISIONS  = [20, 40, 80, 160, 320]   # grid cells per UV tile per axis
+_ZOOM_DIVISIONS  = [10, 20, 40, 80, 160]    # grid cells per UV tile per axis
 
 
 def get_zoom(context):
-    space = context.space_data
-    zoom  = getattr(space, 'zoom', None)
-    if zoom is None:
+    """
+    Calculate stable zoom based on projection matrix, ignoring background images.
+    Returns zoom factor relative to a baseline of 256 pixels per UV unit.
+    """
+    try:
+        import gpu
+        matrix = gpu.matrix.get_projection_matrix()
+        # matrix[0][0] maps UV coordinates to NDC [-1, 1]
+        pixels_per_uv = abs(matrix[0][0]) * context.region.width * 0.5
+        return max(0.01, pixels_per_uv / 256.0)
+    except Exception:
         return 1.0
-    return min(zoom[0], zoom[1])
 
 
 def get_zoom_level(context):
@@ -81,16 +88,6 @@ void main() {
     vec3 col = (cell == 1) ? colLight : colDark;
     float alpha = opacity;
 
-    if (both_mode == 1) {
-        if (cell == 1) {
-            col = vec3(1.0, 1.0, 1.0);
-            alpha = opacity * 0.2;
-        } else {
-            col = vec3(0.0, 0.0, 0.0);
-            alpha = opacity * 0.5;
-        }
-    }
-
     fragColor = vec4(col, alpha);
 }
 """
@@ -111,7 +108,6 @@ def _get_shader():
         info.push_constant('MAT4',  "ModelViewProjectionMatrix")
         info.push_constant('FLOAT', "opacity")
         info.push_constant('INT',   "divisions")
-        info.push_constant('INT',   "both_mode")
         info.vertex_in(0, 'VEC3', "pos")
         info.vertex_in(1, 'VEC2', "warpedUV")
         info.vertex_out(vert_out)
@@ -149,14 +145,15 @@ def build_geometry_batch(obj_cache, props):
     coords = []
     warped_uvs = []
 
-    tex_w = float(props.tex_res_x)
-    tex_h = float(props.tex_res_y)
-    target_texel = float(props.stretch_target_texel)
-
     for cache in obj_cache.values():
         islands = cache.get('islands')
         if not islands:
             continue
+            
+        tex_w = cache.get('tex_w', 1024.0)
+        tex_h = cache.get('tex_h', 1024.0)
+        target_texel = cache.get('target_texel', 500.0)
+        
         for isle in islands:
             if target_texel > 0:
                 scale = target_texel / math.sqrt(tex_w * tex_h)
@@ -333,7 +330,7 @@ def build_geometry_batch(obj_cache, props):
 
 _draw_error_printed = False
 
-def draw(batch, opacity, context, both_mode=False):
+def draw(batch, opacity, context):
     """Draw the checker grid."""
     global _draw_error_printed
     if batch is None:
@@ -350,7 +347,6 @@ def draw(batch, opacity, context, both_mode=False):
         shader.bind()
         shader.uniform_float("opacity",    opacity)
         shader.uniform_int(  "divisions",  divisions)
-        shader.uniform_int(  "both_mode",  1 if both_mode else 0)
         batch.draw(shader)
     except Exception as e:
         if not _draw_error_printed:

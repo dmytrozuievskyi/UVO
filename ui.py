@@ -29,15 +29,27 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
         # ------------------------------------------------------------------
         layout.label(text="Texture Setup")
 
-        tex_row = layout.row(align=True)
-        tex_row.prop(props, "tex_res_x", text="")
+        obj_props = context.active_object.uv_id_props if context.active_object else None
 
-        link_icon = 'LINKED' if props.tex_res_linked else 'UNLINKED'
-        tex_row.prop(props, "tex_res_linked", text="", icon=link_icon, toggle=True)
+        if obj_props:
+            tex_row = layout.row(align=True)
+            tex_row.prop(obj_props, "tex_res_x", text="")
 
-        res_y_sub = tex_row.row(align=True)
-        res_y_sub.enabled = not props.tex_res_linked
-        res_y_sub.prop(props, "tex_res_y", text="")
+            link_icon = 'LINKED' if obj_props.tex_res_linked else 'UNLINKED'
+            tex_row.prop(obj_props, "tex_res_linked", text="", icon=link_icon, toggle=True)
+
+            res_y_sub = tex_row.row(align=True)
+            res_y_sub.enabled = not obj_props.tex_res_linked
+            res_y_sub.prop(obj_props, "tex_res_y", text="")
+
+            # Texel Density
+            td_row = layout.row(align=True)
+            td_row.operator("uv.sample_stretch_texel", text="", icon='EYEDROPPER')
+            td_row.separator()
+            td_row.prop(obj_props, "stretch_target_texel", text="")
+            td_row.prop(obj_props, "stretch_texel_unit", text="")
+        else:
+            layout.label(text="No active object", icon='INFO')
 
         layout.separator()
 
@@ -74,14 +86,12 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
         sub4.prop(props, "intersect_opacity", text="", slider=True)
 
         # ------------------------------------------------------------------
-        # Padding
+        # Padding (Combined into Intersect)
         # ------------------------------------------------------------------
-        layout.label(text="Padding")
-
-        pad_row = layout.row(align=True)
+        pad_row = layout.row(align=False)
         pad_row.prop(props, "show_padding", text="")
 
-        pad_sub = pad_row.row(align=True)
+        pad_sub = pad_row.row(align=False)
         pad_sub.enabled = props.show_padding and active
         pad_sub.separator()
         pad_sub.label(text="Padding:")
@@ -103,18 +113,6 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
         stretch_sub2 = stretch_row.row(align=False)
         stretch_sub2.enabled = props.show_stretch and active
         stretch_sub2.prop(props, "stretch_opacity", text="", slider=True)
-
-        # Row 3 — droplet | target texel | unit
-        # ● droplet is always active (spec: works independently of overlay toggle)
-        # ● target texel field and unit dropdown are always active too (user confirmed)
-        stretch_row3 = layout.row(align=True)
-        stretch_row3.operator(
-            "uv.sample_stretch_texel",
-            text="",
-            icon='EYEDROPPER',
-        )
-        stretch_row3.prop(props, "stretch_target_texel", text="")
-        stretch_row3.prop(props, "stretch_texel_unit", text="")
 
         # ------------------------------------------------------------------
         # Footer

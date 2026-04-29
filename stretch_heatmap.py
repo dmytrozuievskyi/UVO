@@ -19,7 +19,11 @@ void main() {
 
 _FRAG_SRC = """
 void main() {
-    outColor = vec4(fragColor.rgb, opacity);
+    float a = fragColor.a;
+    if (transparent_gray == 0) {
+        a = 1.0;
+    }
+    outColor = vec4(fragColor.rgb, a * opacity);
 }
 """
 
@@ -31,6 +35,7 @@ def _get_shader():
         info = gpu.types.GPUShaderCreateInfo()
         info.push_constant('MAT4',  "ModelViewProjectionMatrix")
         info.push_constant('FLOAT', "opacity")
+        info.push_constant('INT', "transparent_gray")
         info.vertex_in(0, 'VEC3', "pos")
         info.vertex_in(1, 'VEC4', "color")
         vert_out = gpu.types.GPUStageInterfaceInfo("stretch_heatmap_iface")
@@ -53,7 +58,7 @@ def _lerp_color(c1, c2, t):
         c1[0] + (c2[0] - c1[0]) * t,
         c1[1] + (c2[1] - c1[1]) * t,
         c1[2] + (c2[2] - c1[2]) * t,
-        1.0
+        c1[3] + (c2[3] - c1[3]) * t
     )
 
 
@@ -67,19 +72,20 @@ def build_geometry_batch(obj_cache, props):
         coords = []
         colors = []
 
-        tex_w = float(props.tex_res_x)
-        tex_h = float(props.tex_res_y)
-        target_texel = float(props.stretch_target_texel)
-
         # Linear color space
-        col_blue = (0.0, 0.05, 1.0)
-        col_gray = (0.214, 0.214, 0.214) # ~0.5 sRGB mid-gray
-        col_red  = (1.0, 0.05, 0.0)
+        col_blue = (0.0, 0.05, 1.0, 1.0)
+        col_gray = (0.214, 0.214, 0.214, 0.0) # ~0.5 sRGB mid-gray, fully transparent
+        col_red  = (1.0, 0.05, 0.0, 1.0)
 
         for cache in obj_cache.values():
             islands = cache.get('islands')
             if not islands:
                 continue
+                
+            tex_w = cache.get('tex_w', 1024.0)
+            tex_h = cache.get('tex_h', 1024.0)
+            target_texel = cache.get('target_texel', 500.0)
+            
             for isle in islands:
                 if target_texel > 0:
                     scale = target_texel / math.sqrt(tex_w * tex_h)
@@ -173,13 +179,14 @@ def build_geometry_batch(obj_cache, props):
 
 _draw_error_printed = False
 
-def draw(batch, opacity):
+def draw(batch, opacity, transparent_gray=False):
     global _draw_error_printed
     shader = _get_shader()
     if shader and batch:
         try:
             shader.bind()
             shader.uniform_float("opacity", opacity)
+            shader.uniform_int("transparent_gray", 1 if transparent_gray else 0)
             batch.draw(shader)
         except Exception as e:
             if not _draw_error_printed:

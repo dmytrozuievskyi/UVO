@@ -48,16 +48,17 @@ def draw(props, shader, context):
 
     if mode == 'HEATMAP':
         if _heatmap_batch:
-            stretch_heatmap.draw(_heatmap_batch, opacity)
+            stretch_heatmap.draw(_heatmap_batch, opacity, transparent_gray=False)
     elif mode == 'CHECKER':
         if _geo_batch:
             stretch_checker.draw(_geo_batch, opacity, context)
     elif mode == 'BOTH':
-        if _heatmap_batch:
-            stretch_heatmap.draw(_heatmap_batch, opacity)
         if _geo_batch:
-            # both_mode=True outputs transparent white/black instead of solid gray
-            stretch_checker.draw(_geo_batch, opacity, context, both_mode=True)
+            # Checker is drawn as a solid base first
+            stretch_checker.draw(_geo_batch, opacity, context)
+        if _heatmap_batch:
+            # Heatmap is drawn on top with transparent neutral areas
+            stretch_heatmap.draw(_heatmap_batch, opacity, transparent_gray=True)
 
 
 def clear():
