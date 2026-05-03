@@ -133,12 +133,11 @@ def build_geometry_batch(obj_cache, props):
                         area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
                         angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
 
-                        # Weighted sum of area + angle error, signed by area direction
-                        weight = 0.5
+                        # Additive area + angle error, saturated faster when both are wrong
                         sign = 1.0 if area_err >= 0 else -1.0
-                        total_err = sign * (abs(area_err) * (1.0 - weight) + angle_err * weight)
+                        total_err = area_err + sign * angle_err
 
-                        val = max(-1.0, min(1.0, total_err))
+                        val = max(-1.0, min(1.0, total_err * 0.7))
                         if val <= 0:
                             col = _lerp_color(col_gray, col_blue, -val)
                         else:
