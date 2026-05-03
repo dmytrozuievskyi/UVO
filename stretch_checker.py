@@ -3,8 +3,6 @@ import math
 from gpu_extras.batch import batch_for_shader
 from . import stretch
 
-
-
 _ZOOM_THRESHOLDS = [2.0, 4.0, 8.0, 16.0]   # boundaries between levels 1–5
 _ZOOM_DIVISIONS  = [10, 20, 40, 80, 160]    # grid cells per UV tile per axis
 
@@ -73,7 +71,6 @@ void main() {
 
 _shader = None   # cached once per session
 
-
 def _get_shader():
     global _shader
     if _shader is not None:
@@ -106,8 +103,6 @@ def _get_shader():
     return _shader
 
 
-
-
 def build_geometry_batch(obj_cache, props):
     """Build a position-only TRIS batch from all island triangles."""
     if not obj_cache:
@@ -133,8 +128,13 @@ def build_geometry_batch(obj_cache, props):
         for isle in islands:
             if target_texel > 0:
                 scale = target_texel / math.sqrt(tex_w * tex_h)
+                scale_u = target_texel / tex_w
+                scale_v = target_texel / tex_h
             else:
                 scale = math.sqrt(isle.uv_area / isle.surface_area) if isle.surface_area > 0 else 1.0
+                aspect = tex_h / tex_w if tex_w > 0 else 1.0
+                scale_u = scale * math.sqrt(aspect)
+                scale_v = scale / math.sqrt(aspect)
                 
             pivot_u = (isle.aabb[0] + isle.aabb[2]) * 0.5
             pivot_v = (isle.aabb[1] + isle.aabb[3]) * 0.5
@@ -153,10 +153,10 @@ def build_geometry_batch(obj_cache, props):
                 else:
                     M_avg = [1.0, 0.0, 0.0, 1.0]
 
-                M00 = M_avg[0] * scale
-                M01 = M_avg[1] * scale
-                M10 = M_avg[2] * scale
-                M11 = M_avg[3] * scale
+                M00 = M_avg[0] * scale_u
+                M01 = M_avg[1] * scale_v
+                M10 = M_avg[2] * scale_u
+                M11 = M_avg[3] * scale_v
 
                 det_M = M00 * M11 - M01 * M10
                 area_stretch = math.sqrt(abs(det_M)) if det_M != 0 else 1.0
@@ -342,7 +342,6 @@ def build_geometry_batch(obj_cache, props):
         return None
 
 
-
 _draw_error_printed = False
 
 def draw(batch, opacity, context, use_tint=False):
@@ -370,7 +369,6 @@ def draw(batch, opacity, context, use_tint=False):
             print(f"[UVO] stretch_checker draw error: {e}")
             traceback.print_exc()
             _draw_error_printed = True
-
 
 
 def clear():
