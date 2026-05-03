@@ -1,43 +1,18 @@
-"""stretch_checker.py — Checker grid for the Stretch overlay.
-
-The core problem with a vertex-color approach is that the GPU interpolates
-colors across each triangle face, turning every checker cell boundary into
-a gradient. The fix is a custom GLSL fragment shader that computes the
-checker pattern per pixel — no interpolation, always a hard edge.
-
-Bonus: divisions (zoom level) becomes a uniform updated each frame.
-The geometry batch only rebuilds when islands change. No debounce needed.
-
-Layout:
-  - _get_shader()              lazy-init the custom GLSL shader (cached)
-  - build_geometry_batch()     position-only tri batch from island cache
-  - draw(batch, opacity, ctx)  bind shader, set uniforms, draw
-  - clear()                    release shader on unregister
-
-Phase 3 upgrade path:
-  The vertex shader passes pos.xy as uvCoord to the fragment shader.
-  In Phase 3, add a per-triangle Jacobian uniform (or UBO) and transform
-  uvCoord by J_inv inside the vertex shader before it reaches the fragment.
-"""
+"""stretch_checker.py — Checker grid for the Stretch overlay."""
 
 import gpu
 import math
 from gpu_extras.batch import batch_for_shader
+from . import stretch
 
-# ---------------------------------------------------------------------------
-# Zoom levels
-# ---------------------------------------------------------------------------
-# min(zoom_x, zoom_y) — subdivide only when both axes justify it.
+
 
 _ZOOM_THRESHOLDS = [2.0, 4.0, 8.0, 16.0]   # boundaries between levels 1–5
 _ZOOM_DIVISIONS  = [10, 20, 40, 80, 160]    # grid cells per UV tile per axis
 
 
 def get_zoom(context):
-    """
-    Calculate stable zoom based on projection matrix, ignoring background images.
-    Returns zoom factor relative to a baseline of 256 pixels per UV unit.
-    """
+    """Zoom factor relative to 256 px/UV unit, derived from projection matrix."""
     try:
         import gpu
         matrix = gpu.matrix.get_projection_matrix()
@@ -60,12 +35,6 @@ def get_divisions(zoom_level):
     return _ZOOM_DIVISIONS[max(0, min(zoom_level - 1, 4))]
 
 
-# ---------------------------------------------------------------------------
-# GLSL source
-# ---------------------------------------------------------------------------
-# The vertex shader passes the UV position through to the fragment shader.
-# The UV editor's region matrix already maps UV coordinates to screen space,
-# so pos.xy IS the UV coordinate — no separate attribute needed.
 
 _VERT_SRC = """
 void main() {
@@ -116,7 +85,6 @@ def _get_shader():
         info.fragment_source(_FRAG_SRC)
 
         _shader = gpu.shader.create_from_info(info)
-        del vert_out, info
 
     except Exception as e:
         print(f"[UVO] stretch_checker shader compile error: {e}")
@@ -125,16 +93,10 @@ def _get_shader():
     return _shader
 
 
-# ---------------------------------------------------------------------------
-# Batch — geometry only, rebuilt on island change
-# ---------------------------------------------------------------------------
+
 
 def build_geometry_batch(obj_cache, props):
-    """Build a position-only TRIS batch from all island triangles.
-
-    This batch is stable — it only changes when UV geometry changes.
-    Zoom level (divisions) is handled as a per-frame uniform, not here.
-    """
+    """Build a position-only TRIS batch from all island triangles."""
     if not obj_cache:
         return None
 
@@ -164,30 +126,7 @@ def build_geometry_batch(obj_cache, props):
             pivot_v = (isle.aabb[1] + isle.aabb[3]) * 0.5
 
             # 1. Area-weighted average of Jacobians per UV vertex
-            vert_M_sum = {}
-            vert_area_sum = {}
-
-            # We use a 5-decimal rounding to identify shared UV vertices
-            for i, tri in enumerate(isle.tris):
-                M = isle.jacobians[i]
-                u0, v0 = tri[0]
-                u1, v1 = tri[1]
-                u2, v2 = tri[2]
-                
-                # 2D area of triangle in UV space
-                area = abs((u1 - u0) * (v2 - v0) - (v1 - v0) * (u2 - u0)) * 0.5
-
-                for u, v in tri:
-                    key = (round(u, 5), round(v, 5))
-                    if key not in vert_M_sum:
-                        vert_M_sum[key] = [0.0, 0.0, 0.0, 0.0]
-                        vert_area_sum[key] = 0.0
-                    
-                    vert_M_sum[key][0] += M[0] * area
-                    vert_M_sum[key][1] += M[1] * area
-                    vert_M_sum[key][2] += M[2] * area
-                    vert_M_sum[key][3] += M[3] * area
-                    vert_area_sum[key] += area
+            vert_M_sum, vert_area_sum = stretch.compute_vertex_jacobians(isle)
 
             # 2. Build vertex adjacency for BFS integration
             adj = {}
@@ -243,7 +182,6 @@ def build_geometry_batch(obj_cache, props):
                             du = nbr[0] - curr[0]
                             dv = nbr[1] - curr[1]
 
-                            # Integrate step
                             w_n_u = w_curr[0] + M00 * du + M01 * dv
                             w_n_v = w_curr[1] + M10 * du + M11 * dv
                             
@@ -324,9 +262,6 @@ def build_geometry_batch(obj_cache, props):
         return None
 
 
-# ---------------------------------------------------------------------------
-# Draw — called every frame
-# ---------------------------------------------------------------------------
 
 _draw_error_printed = False
 
@@ -356,9 +291,6 @@ def draw(batch, opacity, context):
             _draw_error_printed = True
 
 
-# ---------------------------------------------------------------------------
-# Cleanup
-# ---------------------------------------------------------------------------
 
 def clear():
     """Release the cached shader on unregister."""

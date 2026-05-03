@@ -348,13 +348,16 @@ def _start_classify_timer():
     _cancel_classify_timer()
 
     def _poll():
+        global _classify_timer_fn
         import sys as _sys
         pkg = _sys.modules.get(__package__)
         if pkg is None:
+            _classify_timer_fn = None
             return None
 
         rq = pkg.get_result_queue()
         if rq is None:
+            _classify_timer_fn = None
             return None
 
         try:
@@ -365,10 +368,12 @@ def _start_classify_timer():
 
         if result.get('type') == 'error':
             utils.log("async", f"worker error: {result.get('msg')}")
+            _classify_timer_fn = None
             return None
 
         if result.get('type') != 'classify_all_result':
             # ping/pong or unknown — put back and stop timer
+            _classify_timer_fn = None
             return None
 
         job_id = result.get('id')
@@ -377,6 +382,7 @@ def _start_classify_timer():
             return 0.05   # keep polling — our result may still be coming
 
         _apply_classify_result(result)
+        _classify_timer_fn = None
         return None  # unregister timer
 
     _classify_timer_fn = _poll
@@ -642,7 +648,7 @@ def _rebuild_intersect_batches(props):
 
     _t0 = time.perf_counter()
 
-    # ── Try async path first ──────────────────────────────────────────────────
+    # Try async path first 
     if _dispatch_classify_job(props):
         _start_classify_timer()
         utils.log("async", "classify dispatched to worker — returning immediately")
@@ -650,7 +656,7 @@ def _rebuild_intersect_batches(props):
 
     utils.log("async", "worker unavailable — falling back to sync classify")
 
-    # ── Synchronous fallback ──────────────────────────────────────────────────
+    # Synchronous fallback
     shader   = _get_shader()
     opacity  = props.intersect_opacity
     tiled    = (props.intersect_uv_mode == 'TILED')
@@ -1089,14 +1095,24 @@ def update_batches_safe(context):
                         del _isect_cross_cache[pk]
                 any_changed = True
 
-        if any_changed and props.show_intersect and not props.is_muted:
-            _rebuild_intersect_batches(props)
+        if props.show_intersect and not props.is_muted:
+            if any_changed or (_intersect_batches['hatch'] is None and _classify_timer_fn is None):
+                _rebuild_intersect_batches(props)
+        else:
+            _intersect_batches['hatch'] = None
+            _intersect_batches['checker'] = None
 
-        if any_changed and props.show_padding and not props.is_muted:
-            _rebuild_padding_batches(props)
+        if props.show_padding and not props.is_muted:
+            if any_changed or padding.batches['ok'] is None:
+                _rebuild_padding_batches(props)
+        else:
+            padding.clear()
 
-        if any_changed and props.show_stretch and not props.is_muted:
-            stretch.rebuild(props, _obj_cache, context)
+        if props.show_stretch and not props.is_muted:
+            if any_changed or stretch._geo_batch is None:
+                stretch.rebuild(props, _obj_cache, context)
+        else:
+            stretch.clear()
 
     except Exception as e:
         utils.log("update", f"error: {e}")
@@ -1186,12 +1202,12 @@ def draw_callback():
         gpu.state.depth_test_set('NONE')
         shader.bind()
 
-        # ── Pass 1: stretch overlay (checker + heatmap) ───────────────────────
+        # Pass 1: stretch overlay (checker + heatmap)
         if props.show_stretch:
             stretch.draw(props, shader, bpy.context)
             shader.bind() # restore shader in case stretch changed it
 
-        # ── Pass 2: UV ID color fill ──────────────────────────────────────────
+        # Pass 2: UV ID color fill
         if props.show_uv_id:
             for cache in _obj_cache.values():
                 b = cache.get('id_batch')
@@ -1199,16 +1215,16 @@ def draw_callback():
                     b.draw(shader)
 
         if props.show_intersect:
-            # ── Pass 3: hatch on intersecting islands ─────────────────────────
+            # Pass 3: hatch on intersecting islands 
             gpu.state.line_width_set(2.0)
             if _intersect_batches['hatch']:
                 _intersect_batches['hatch'].draw(shader)
 
-            # ── Pass 4: cross-hatch on stacked islands ────────────────────────
+            # Pass 4: cross-hatch on stacked islands 
             if _intersect_batches['checker']:
                 _intersect_batches['checker'].draw(shader)
 
-            # ── Pass 5: offscreen overlap fill (always drawn if intersections exist) ──
+            # Pass 5: offscreen overlap fill (always drawn if intersections exist)
             if _inter_island_tris:
                 utils.log("pass4", f"tris={len(_inter_island_tris)}")
                 if offscreen.check_view_matrix():
@@ -1217,7 +1233,7 @@ def draw_callback():
                 offscreen.composite(props.intersect_opacity, _inter_threshold)
                 shader.bind()  # restore after offscreen composite
 
-        # ── Pass 6: padding outlines ──────────────────────────────────────────
+        # Pass 6: padding outlines
         if props.show_padding:
             if padding.batches['ok']:
                 padding.batches['ok'].draw(shader)
@@ -1270,3 +1286,10 @@ def unregister():
     _inter_threshold   = 0.6
     _shader            = None
     utils.log_clear()
+
+
+def tag_redraw(context):
+    if context.screen:
+        for area in context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                area.tag_redraw()

@@ -6,7 +6,7 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
     bl_idname      = "IMAGE_PT_uv_id_overlay"
     bl_space_type  = 'IMAGE_EDITOR'
     bl_region_type = 'HEADER'
-    bl_ui_units_x  = 14
+    bl_ui_units_x  = 12
 
     def draw(self, context):
         layout = self.layout
@@ -24,9 +24,6 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
 
         active = not props.is_muted
 
-        # ------------------------------------------------------------------
-        # Global: Texture Setup
-        # ------------------------------------------------------------------
         layout.label(text="Texture Setup")
 
         obj_props = context.active_object.uv_id_props if context.active_object else None
@@ -42,7 +39,6 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
             res_y_sub.enabled = not obj_props.tex_res_linked
             res_y_sub.prop(obj_props, "tex_res_y", text="")
 
-            # Texel Density
             td_row = layout.row(align=True)
             td_row.operator("uv.sample_stretch_texel", text="", icon='EYEDROPPER')
             td_row.separator()
@@ -53,70 +49,62 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
 
         layout.separator()
 
-        # ------------------------------------------------------------------
-        # UV ID
-        # ------------------------------------------------------------------
         layout.label(text="UV ID")
 
-        row = layout.row(align=False)
-        row.prop(props, "show_uv_id", text="")
+        row_uv = layout.row(align=False)
+        row_uv.prop(props, "show_uv_id", text="")
 
-        sub = row.row(align=False)
-        sub.enabled = props.show_uv_id and active
-        sub.prop(props, "overlay_mode", text="")
+        content_uv = row_uv.row(align=False)
+        content_uv.enabled = props.show_uv_id and active
 
-        sub2 = row.row(align=False)
-        sub2.enabled = props.show_uv_id and active
-        sub2.prop(props, "opacity", text="", slider=True)
 
-        # ------------------------------------------------------------------
-        # Intersect
-        # ------------------------------------------------------------------
+        split_fac = 0.5
+
+        split_uv = content_uv.split(factor=split_fac, align=False)
+        split_uv.prop(props, "overlay_mode", text="")
+        split_uv.prop(props, "opacity", text="", slider=True)
+
         layout.label(text="Intersect")
 
-        row3 = layout.row(align=False)
-        row3.prop(props, "show_intersect", text="")
+        row_int = layout.row(align=False)
 
-        sub3 = row3.row(align=False)
-        sub3.enabled = props.show_intersect and active
-        sub3.prop(props, "intersect_uv_mode", text="")
+        row_int.prop(props, "show_intersect", text="")
 
-        sub4 = row3.row(align=False)
-        sub4.enabled = props.show_intersect and active
-        sub4.prop(props, "intersect_opacity", text="", slider=True)
+        content_int = row_int.row(align=False)
+        content_int.enabled = props.show_intersect and active
 
-        # ------------------------------------------------------------------
-        # Padding (Combined into Intersect)
-        # ------------------------------------------------------------------
-        pad_row = layout.row(align=False)
-        pad_row.prop(props, "show_padding", text="")
+        split_int = content_int.split(factor=split_fac, align=False)
 
-        pad_sub = pad_row.row(align=False)
-        pad_sub.enabled = props.show_padding and active
-        pad_sub.separator()
-        pad_sub.label(text="Padding:")
-        pad_sub.prop(props, "padding_px", text="")
+        split_int.prop(props, "intersect_uv_mode", text="")
+        split_int.prop(props, "intersect_opacity", text="", slider=True)
 
-        # ------------------------------------------------------------------
-        # Stretch
-        # ------------------------------------------------------------------
+        row_pad = layout.row(align=False)
+
+        row_pad.prop(props, "show_padding", text="")
+
+        content_pad = row_pad.row(align=False)
+        content_pad.enabled = props.show_padding and active
+
+        split_pad = content_pad.split(factor=split_fac, align=False)
+
+        lbl_row = split_pad.row()
+        lbl_row.alignment = 'LEFT'
+        lbl_row.label(text=" Padding:")
+
+        split_pad.prop(props, "padding_px", text="")
+
         layout.label(text="Stretch")
 
-        # Row 2 — toggle | mode | opacity
-        stretch_row = layout.row(align=False)
-        stretch_row.prop(props, "show_stretch", text="")
+        row_str = layout.row(align=False)
+        row_str.prop(props, "show_stretch", text="")
 
-        stretch_sub = stretch_row.row(align=False)
-        stretch_sub.enabled = props.show_stretch and active
-        stretch_sub.prop(props, "stretch_mode", text="")
+        content_str = row_str.row(align=False)
+        content_str.enabled = props.show_stretch and active
 
-        stretch_sub2 = stretch_row.row(align=False)
-        stretch_sub2.enabled = props.show_stretch and active
-        stretch_sub2.prop(props, "stretch_opacity", text="", slider=True)
+        split_str = content_str.split(factor=split_fac, align=False)
+        split_str.prop(props, "stretch_mode", text="")
+        split_str.prop(props, "stretch_opacity", text="", slider=True)
 
-        # ------------------------------------------------------------------
-        # Footer
-        # ------------------------------------------------------------------
         layout.separator()
         layout.prop(props, "live_update", text="Live Update")
 

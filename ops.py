@@ -41,9 +41,6 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         )
 
     def execute(self, context):
-        # ----------------------------------------------------------------
-        # Phase 1 stub — real Jacobian-based calculation comes in Phase 2+.
-        # ----------------------------------------------------------------
         if not context.active_object:
             return {'CANCELLED'}
             
@@ -73,7 +70,7 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         self.report({'INFO'}, f"Sampled: {display_val:.1f} {unit_label}")
         return {'FINISHED'}
 
-    # ------------------------------------------------------------------
+
     def _sample(self, context, props):
         """
         Calculate texel density (px/m) for the selected UV islands.
@@ -85,10 +82,7 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         - uv_area        : sum of triangle areas in UV [0,1] space
         - surface_area_3d: sum of triangle areas in 3D object space (metres)
 
-        The maximum density across all selected islands is taken as the target
-        (the highest-quality island drives the reference — per spec §4.5).
-
-        Internal storage is always px/m. Unit dropdown only affects display.
+        The maximum density across all selected islands is taken as the target.
         """
         import bmesh
 
@@ -109,7 +103,7 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         if not selected_faces:
             raise RuntimeError("No faces selected")
 
-        # --- island grouping (connected selected faces) ---
+        # Island grouping (connected selected faces)
         islands = _find_uv_islands(selected_faces, uv_layer)
 
         densities = []
@@ -144,7 +138,7 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
                     surf_area += e1.cross(e2).length * 0.5
 
             if surf_area < 1e-12 or uv_area < 1e-12:
-                continue  # zero-area island — skip (per spec §4.4)
+                continue  # zero-area island — skip
 
             density = math.sqrt((tex_w * tex_h) * (uv_area / surf_area))
             densities.append(density)
@@ -152,18 +146,12 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         if not densities:
             raise RuntimeError("All selected islands have zero area")
 
-        return max(densities)  # spec: take maximum across selection
+        return max(densities)  # take maximum across selection
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _find_uv_islands(faces, uv_layer):
-    """
-    Group faces into UV islands using flood-fill over shared UV vertices.
-    Two faces belong to the same island if they share a UV loop coordinate.
-    """
+    """Group faces into UV islands using flood-fill over shared UV vertices."""
     face_set   = set(faces)
     visited    = set()
     islands    = []

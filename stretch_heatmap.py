@@ -1,7 +1,5 @@
-"""
-stretch_heatmap.py
+"""stretch_heatmap.py — Heatmap overlay for UV stretch visualization.
 
-Phase 4: Heatmap overlay for UV stretch visualization.
 Calculates per-vertex stretch values from the cached Jacobians and outputs a 
 smooth color gradient (Blue = compressed, Gray = perfect, Red = stretched).
 """
@@ -9,6 +7,7 @@ smooth color gradient (Blue = compressed, Gray = perfect, Red = stretched).
 import gpu
 import math
 from gpu_extras.batch import batch_for_shader
+from . import stretch
 
 _VERT_SRC = """
 void main() {
@@ -93,27 +92,7 @@ def build_geometry_batch(obj_cache, props):
                     scale = math.sqrt(isle.uv_area / isle.surface_area) if isle.surface_area > 0 else 1.0
 
                 # 1. Area-weighted average of Jacobians per UV vertex
-                vert_M_sum = {}
-                vert_area_sum = {}
-
-                for i, tri in enumerate(isle.tris):
-                    M = isle.jacobians[i]
-                    u0, v0 = tri[0]
-                    u1, v1 = tri[1]
-                    u2, v2 = tri[2]
-                    area = abs((u1 - u0) * (v2 - v0) - (v1 - v0) * (u2 - u0)) * 0.5
-
-                    for u, v in tri:
-                        key = (round(u, 5), round(v, 5))
-                        if key not in vert_M_sum:
-                            vert_M_sum[key] = [0.0, 0.0, 0.0, 0.0]
-                            vert_area_sum[key] = 0.0
-                        
-                        vert_M_sum[key][0] += M[0] * area
-                        vert_M_sum[key][1] += M[1] * area
-                        vert_M_sum[key][2] += M[2] * area
-                        vert_M_sum[key][3] += M[3] * area
-                        vert_area_sum[key] += area
+                vert_M_sum, vert_area_sum = stretch.compute_vertex_jacobians(isle)
 
                 # 2. Compute stretch color per vertex
                 for i, tri in enumerate(isle.tris):
@@ -135,11 +114,15 @@ def build_geometry_batch(obj_cache, props):
                         area_stretch = math.sqrt(abs(det_M)) if det_M != 0 else 1.0
 
                         # Angle Stretch: ratio of singular values
-                        trace = M00 + M11
-                        diff = M00 - M11
-                        desc = math.sqrt(max(0.0, diff*diff + 4.0 * M01 * M10))
-                        s1 = (trace + desc) * 0.5
-                        s2 = (trace - desc) * 0.5
+                        # SVD for 2x2: singular values of [[M00, M01], [M10, M11]]
+                        E = (M00 + M11) * 0.5
+                        F = (M00 - M11) * 0.5
+                        G = (M10 + M01) * 0.5
+                        H = (M10 - M01) * 0.5
+                        Q = math.sqrt(E*E + H*H)
+                        R = math.sqrt(F*F + G*G)
+                        s1 = Q + R   # always >= 0
+                        s2 = abs(Q - R)
                         
                         if abs(s1) < 1e-8 or abs(s2) < 1e-8:
                             angle_stretch = 1.0
@@ -150,12 +133,11 @@ def build_geometry_batch(obj_cache, props):
                         area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
                         angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
 
-                        # Combine
+                        # Weighted sum of area + angle error, signed by area direction
                         weight = 0.5
                         sign = 1.0 if area_err >= 0 else -1.0
                         total_err = sign * (abs(area_err) * (1.0 - weight) + angle_err * weight)
 
-                        # Map to color
                         val = max(-1.0, min(1.0, total_err))
                         if val <= 0:
                             col = _lerp_color(col_gray, col_blue, -val)

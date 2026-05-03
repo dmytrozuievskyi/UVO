@@ -80,9 +80,6 @@ def update_show_uv_id(self, context):
 
 
 def update_intersect(self, context):
-    from . import draw
-    if self.show_intersect and not self.is_muted:
-        draw._rebuild_intersect_batches(self)
     _sync_draw(context)
 
 
@@ -94,10 +91,6 @@ def update_intersect_settings(self, context):
 
 
 def update_padding(self, context):
-    # Rebuild immediately from cached islands — don't wait for geometry change.
-    from . import draw
-    if self.show_padding and not self.is_muted:
-        draw._rebuild_padding_batches(self)
     _sync_draw(context)
 
 
@@ -148,6 +141,13 @@ def update_stretch(self, context):
     _sync_draw(context)
 
 
+def update_stretch_mode(self, context):
+    if context.screen:
+        for area in context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                area.tag_redraw()
+
+
 def update_stretch_opacity(self, context):
     # Opacity-only change — no batch rebuild needed, just redraw.
     if context.screen:
@@ -173,7 +173,6 @@ def _do_texel_update():
                 draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
                 draw._obj_cache[obj.name]['target_texel'] = float(obj.uv_id_props.stretch_internal_texel)
                 
-        # Force stretch to rebuild with new values
         stretch.rebuild(props, draw._obj_cache, bpy.context)
         draw.tag_redraw(bpy.context)
     return None
@@ -361,10 +360,6 @@ class UVIDProperties(bpy.types.PropertyGroup):
         description="Minimum padding distance between islands in pixels",
         update=update_padding_settings,
     )
-
-    # ------------------------------------------------------------------
-    # Stretch overlay
-    # ------------------------------------------------------------------
     show_stretch: bpy.props.BoolProperty(
         default=False,
         name="Stretch",
@@ -380,6 +375,7 @@ class UVIDProperties(bpy.types.PropertyGroup):
         ],
         default='BOTH',
         description="Which visual layers to display for the stretch overlay",
+        update=update_stretch_mode,
     )
     stretch_opacity: bpy.props.FloatProperty(
         default=0.8,
@@ -405,6 +401,15 @@ def register():
 
 
 def unregister():
+    # Cancel any pending texel update timer
+    global _texel_timer_fn
+    if _texel_timer_fn is not None:
+        try:
+            bpy.app.timers.unregister(_texel_timer_fn)
+        except Exception:
+            pass
+        _texel_timer_fn = None
+
     try:
         del bpy.types.Scene.uv_id_props
     except AttributeError:
