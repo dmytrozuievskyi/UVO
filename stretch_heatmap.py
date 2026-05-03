@@ -1,9 +1,3 @@
-"""stretch_heatmap.py — Heatmap overlay for UV stretch visualization.
-
-Calculates per-vertex stretch values from the cached Jacobians and outputs a 
-smooth color gradient (Blue = compressed, Gray = perfect, Red = stretched).
-"""
-
 import gpu
 import math
 from gpu_extras.batch import batch_for_shader
@@ -72,9 +66,9 @@ def build_geometry_batch(obj_cache, props):
         colors = []
 
         # Linear color space
-        col_blue = (0.0, 0.05, 1.0, 1.0)
-        col_gray = (0.214, 0.214, 0.214, 0.0) # ~0.5 sRGB mid-gray, fully transparent
-        col_red  = (1.0, 0.05, 0.0, 1.0)
+        col_blue = (0.0, 0.0, 1.0, 1.0)
+        col_gray = (0.214, 0.214, 0.214, 0.0)
+        col_red  = (1.0, 0.0, 0.0, 1.0)
 
         for cache in obj_cache.values():
             islands = cache.get('islands')
@@ -138,6 +132,7 @@ def build_geometry_batch(obj_cache, props):
                         total_err = area_err + sign * angle_err
 
                         val = max(-1.0, min(1.0, total_err * 0.7))
+
                         if val <= 0:
                             col = _lerp_color(col_gray, col_blue, -val)
                         else:

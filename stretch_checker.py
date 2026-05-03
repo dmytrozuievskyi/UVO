@@ -1,5 +1,3 @@
-"""stretch_checker.py — Checker grid for the Stretch overlay."""
-
 import gpu
 import math
 from gpu_extras.batch import batch_for_shader
@@ -39,6 +37,7 @@ def get_divisions(zoom_level):
 _VERT_SRC = """
 void main() {
     uvCoord = warpedUV;
+    heatColor = color;
     gl_Position = ModelViewProjectionMatrix * vec4(pos, 1.0);
 }
 """
@@ -55,6 +54,17 @@ void main() {
     vec3 colDark  = vec3(0.0453, 0.0453, 0.0453);
     vec3 colLight = vec3(0.1008, 0.1008, 0.1008);
     vec3 col = (cell == 1) ? colLight : colDark;
+
+    if (use_tint == 1) {
+        float tint = heatColor.a;  // alpha carries how much deviation exists
+        // Standard cells are very dark (0.045 / 0.10). 
+        // For vibrant colors, target a much brighter color when stretched.
+        vec3 targetColor = (cell == 1) ? heatColor.rgb : (heatColor.rgb * 0.5);
+        
+        // Punch small values by multiplying tint, but hard-cap at 0.75
+        float mixFactor = min(tint * 1.5, 0.75);
+        col = mix(col, targetColor, mixFactor);
+    }
     float alpha = opacity;
 
     fragColor = vec4(col, alpha);
@@ -72,13 +82,16 @@ def _get_shader():
     try:
         vert_out = gpu.types.GPUStageInterfaceInfo("stretch_checker_iface")
         vert_out.smooth('VEC2', "uvCoord")
+        vert_out.smooth('VEC4', "heatColor")
 
         info = gpu.types.GPUShaderCreateInfo()
         info.push_constant('MAT4',  "ModelViewProjectionMatrix")
         info.push_constant('FLOAT', "opacity")
         info.push_constant('INT',   "divisions")
+        info.push_constant('INT',   "use_tint")
         info.vertex_in(0, 'VEC3', "pos")
         info.vertex_in(1, 'VEC2', "warpedUV")
+        info.vertex_in(2, 'VEC4', "color")
         info.vertex_out(vert_out)
         info.fragment_out(0, 'VEC4', "fragColor")
         info.vertex_source(_VERT_SRC)
@@ -106,6 +119,7 @@ def build_geometry_batch(obj_cache, props):
 
     coords = []
     warped_uvs = []
+    colors = []
 
     for cache in obj_cache.values():
         islands = cache.get('islands')
@@ -127,6 +141,70 @@ def build_geometry_batch(obj_cache, props):
 
             # 1. Area-weighted average of Jacobians per UV vertex
             vert_M_sum, vert_area_sum = stretch.compute_vertex_jacobians(isle)
+
+            # 1.5. Compute heat colors per vertex
+            col_blue = (0.0, 0.0, 1.0, 1.0)
+            col_gray = (0.214, 0.214, 0.214, 0.0)
+            col_red  = (1.0, 0.0, 0.0, 1.0)
+            heat_colors = {}
+            for key, area in vert_area_sum.items():
+                if area > 1e-8:
+                    M_avg = [m / area for m in vert_M_sum[key]]
+                else:
+                    M_avg = [1.0, 0.0, 0.0, 1.0]
+
+                M00 = M_avg[0] * scale
+                M01 = M_avg[1] * scale
+                M10 = M_avg[2] * scale
+                M11 = M_avg[3] * scale
+
+                det_M = M00 * M11 - M01 * M10
+                area_stretch = math.sqrt(abs(det_M)) if det_M != 0 else 1.0
+
+                E = (M00 + M11) * 0.5
+                F = (M00 - M11) * 0.5
+                G = (M10 + M01) * 0.5
+                H = (M10 - M01) * 0.5
+                Q = math.sqrt(E*E + H*H)
+                R = math.sqrt(F*F + G*G)
+                s1 = Q + R
+                s2 = abs(Q - R)
+                
+                if abs(s1) < 1e-8 or abs(s2) < 1e-8:
+                    angle_stretch = 1.0
+                else:
+                    angle_stretch = (abs(s1/s2) + abs(s2/s1)) * 0.5
+
+                area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
+                angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
+
+                # Additive area + angle error
+                sign = 1.0 if area_err >= 0 else -1.0
+                total_err = area_err + sign * angle_err
+
+                val = max(-1.0, min(1.0, total_err * 0.7))
+                
+                mag = abs(val)
+                boosted_mag = (mag + math.sqrt(mag)) * 0.5
+                val = boosted_mag if val >= 0 else -boosted_mag
+
+                if val <= 0:
+                    t = -val
+                    c = (
+                        col_gray[0] + (col_blue[0] - col_gray[0]) * t,
+                        col_gray[1] + (col_blue[1] - col_gray[1]) * t,
+                        col_gray[2] + (col_blue[2] - col_gray[2]) * t,
+                        col_gray[3] + (col_blue[3] - col_gray[3]) * t
+                    )
+                else:
+                    t = val
+                    c = (
+                        col_gray[0] + (col_red[0] - col_gray[0]) * t,
+                        col_gray[1] + (col_red[1] - col_gray[1]) * t,
+                        col_gray[2] + (col_red[2] - col_gray[2]) * t,
+                        col_gray[3] + (col_red[3] - col_gray[3]) * t
+                    )
+                heat_colors[key] = c
 
             # 2. Build vertex adjacency for BFS integration
             adj = {}
@@ -238,7 +316,7 @@ def build_geometry_batch(obj_cache, props):
             for i, tri in enumerate(isle.tris):
                 for u, v in tri:
                     key = (round(u, 5), round(v, 5))
-                    # Fallback to pure affine if vertex is disconnected (should never happen)
+                    # Fallback to pure affine if vertex is disconnected
                     if key in w_dict:
                         w_u, w_v = w_dict[key]
                     else:
@@ -246,6 +324,7 @@ def build_geometry_batch(obj_cache, props):
                         
                     coords.append((u, v, 0.0))
                     warped_uvs.append((w_u, w_v))
+                    colors.append(heat_colors.get(key, col_gray))
 
     if not coords:
         return None
@@ -253,7 +332,8 @@ def build_geometry_batch(obj_cache, props):
     try:
         return batch_for_shader(shader, 'TRIS', {
             "pos": coords,
-            "warpedUV": warped_uvs
+            "warpedUV": warped_uvs,
+            "color": colors
         })
     except Exception as e:
         import traceback
@@ -265,7 +345,7 @@ def build_geometry_batch(obj_cache, props):
 
 _draw_error_printed = False
 
-def draw(batch, opacity, context):
+def draw(batch, opacity, context, use_tint=False):
     """Draw the checker grid."""
     global _draw_error_printed
     if batch is None:
@@ -282,6 +362,7 @@ def draw(batch, opacity, context):
         shader.bind()
         shader.uniform_float("opacity",    opacity)
         shader.uniform_int(  "divisions",  divisions)
+        shader.uniform_int(  "use_tint",   1 if use_tint else 0)
         batch.draw(shader)
     except Exception as e:
         if not _draw_error_printed:

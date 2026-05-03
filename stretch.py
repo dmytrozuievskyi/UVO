@@ -1,5 +1,3 @@
-"""stretch.py — Stretch overlay coordinator."""
-
 def compute_vertex_jacobians(isle):
     """Area-weighted average of Jacobians per UV vertex."""
     vert_M_sum = {}
@@ -58,13 +56,10 @@ def draw(props, shader, context):
             stretch_heatmap.draw(_heatmap_batch, opacity, transparent_gray=False)
     elif mode == 'CHECKER':
         if _geo_batch:
-            stretch_checker.draw(_geo_batch, opacity, context)
+            stretch_checker.draw(_geo_batch, opacity, context, use_tint=False)
     elif mode == 'BOTH':
         if _geo_batch:
-            stretch_checker.draw(_geo_batch, opacity, context)
-        if _heatmap_batch:
-            # Heatmap is drawn on top with transparent neutral areas
-            stretch_heatmap.draw(_heatmap_batch, opacity, transparent_gray=True)
+            stretch_checker.draw(_geo_batch, opacity, context, use_tint=True)
 
 
 def clear():
