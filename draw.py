@@ -1175,7 +1175,13 @@ def depsgraph_update_handler(scene, depsgraph):
                 pass
 
     if prop.live_update:
-        _do_rebuild()
+        if prop.show_stretch:
+            if not _obj_cache:
+                _do_rebuild()
+            else:
+                _schedule_debounce()
+        else:
+            _do_rebuild()
     else:
         # Empty cache means we just entered edit mode — rebuild immediately
         # rather than waiting for the debounce delay.
