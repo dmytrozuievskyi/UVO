@@ -3,7 +3,7 @@ import math
 from gpu_extras.batch import batch_for_shader
 from . import stretch
 
-_ZOOM_THRESHOLDS = [2.0, 4.0, 8.0, 16.0]   # boundaries between levels 1–5
+_ZOOM_THRESHOLDS = [4.0, 8.0, 16.0, 32.0]   # boundaries between levels 1–5
 _ZOOM_DIVISIONS  = [10, 20, 40, 80, 160]    # grid cells per UV tile per axis
 
 

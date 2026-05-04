@@ -44,9 +44,9 @@ def draw(props, shader, context):
     """Draw stretch overlay layers.
 
     Mode routing:
-      BOTH    → heatmap drawn solid, checker drawn with transparency on top
-      CHECKER → checker only
-      HEATMAP → heatmap only
+      BOTH    → checker grid with heatmap colors tinted into each cell
+      CHECKER → checker only (neutral dark grid, no color tint)
+      HEATMAP → heatmap only (smooth vertex-interpolated gradient)
     """
     mode    = props.stretch_mode
     opacity = props.stretch_opacity
