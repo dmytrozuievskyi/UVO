@@ -36,6 +36,18 @@ Visualizes the padding zone around each island and flags islands whose zones ove
 
 ---
 
+### Stretch Overlay
+Visualizes texel density deviation from a target value using a warped checker grid and color heatmap.
+
+- **Checker** — grid deforms to show UV distortion; uniform squares = no stretch
+- **Heatmap** — blue (compressed) → gray (uniform) → red (stretched) gradient
+- **Both** — checker grid with heatmap colors blended into each cell, combining distortion shape and density feedback in a single view
+- Per-object texture resolution and texel density settings
+- Eyedropper tool to sample density from selected UV islands
+- Correct visualization for non-square textures
+
+---
+
 ## Installation
 
 1. Download the latest release `.zip` from the [Releases](../../releases) page
@@ -51,7 +63,7 @@ Visualizes the padding zone around each island and flags islands whose zones ove
 2. Open the **UV Editor**
 3. Make sure **Overlays** are enabled in the UV Editor header
 4. Click the **UVO button** in the tool header (right side) to open the overlay panel
-5. Enable any combination of ID, Intersect, and Padding overlays
+5. Enable any combination of ID, Intersect, Padding, and Stretch overlays
 
 **Live Update** — when enabled, overlays refresh on every UV change. Disable for smoother editing on complex meshes; overlays will update once after each action completes.
 
