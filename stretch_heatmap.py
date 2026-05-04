@@ -127,15 +127,12 @@ def build_geometry_batch(obj_cache, props):
                     area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
                     angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
 
-                    # Additive area + angle error
+                    # Weighted sum of area + angle error, signed by area direction
+                    weight = 0.5
                     sign = 1.0 if area_err >= 0 else -1.0
-                    total_err = area_err + sign * angle_err
+                    total_err = sign * (abs(area_err) * (1.0 - weight) + angle_err * weight)
 
-                    val = max(-1.0, min(1.0, total_err * 0.7))
-
-                    mag = abs(val)
-                    boosted_mag = (mag + math.sqrt(mag)) * 0.5
-                    val = boosted_mag if val >= 0 else -boosted_mag
+                    val = max(-1.0, min(1.0, total_err))
 
                     if val <= 0:
                         heat_colors[key] = _lerp_color(col_gray, col_blue, -val)
