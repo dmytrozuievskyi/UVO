@@ -1,5 +1,6 @@
 import gpu
 import math
+import traceback
 from gpu_extras.batch import batch_for_shader
 from . import stretch
 
@@ -152,7 +153,6 @@ def build_geometry_batch(obj_cache, props):
         return batch_for_shader(shader, 'TRIS', {"pos": coords, "color": colors})
 
     except Exception as e:
-        import traceback
         print(f"[UVO] stretch_heatmap build_geometry_batch error: {e}")
         traceback.print_exc()
         return None
@@ -171,7 +171,6 @@ def draw(batch, opacity, transparent_gray=False):
             batch.draw(shader)
         except Exception as e:
             if not _draw_error_printed:
-                import traceback
                 print(f"[UVO] stretch_heatmap draw error: {e}")
                 traceback.print_exc()
                 _draw_error_printed = True

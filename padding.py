@@ -355,8 +355,13 @@ def rebuild(props, obj_cache):
         else:
             _add(segs, col_ok,  ok_coords,  ok_colors)
 
+    if all_islands_data:
+        _, last_res_x, last_res_y = all_islands_data[-1]
+    else:
+        last_res_x, last_res_y = 1024, 1024
+
     utils.log("padding", (
-        f"pad={pad_px}px res={res_x}x{res_y} aspect={aspect:.3f} "
+        f"pad={pad_px}px res_last={last_res_x}x{last_res_y} aspect={aspect:.3f} "
         f"ok_segs={len(ok_coords)//2} bad_segs={len(bad_coords)//2}"
     ))
 

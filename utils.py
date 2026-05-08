@@ -40,13 +40,19 @@ _last: dict = {}
 
 
 
+_cached_debug = None
+
 def _debug_enabled() -> bool:
+    global _cached_debug
+    if _cached_debug is not None:
+        return _cached_debug
     try:
         import bpy as _bpy
         prefs = _bpy.context.preferences.addons.get(__package__)
         if prefs is None:
             return False
-        return getattr(prefs.preferences, 'debug', False)
+        _cached_debug = getattr(prefs.preferences, 'debug', False)
+        return _cached_debug
     except Exception:
         # Running outside Blender (worker subprocess) — always log.
         return True
@@ -64,4 +70,6 @@ def log(key: str, msg: str) -> None:
 
 def log_clear() -> None:
     """Reset dedup state on unregister."""
+    global _cached_debug
+    _cached_debug = None
     _last.clear()

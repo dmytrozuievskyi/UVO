@@ -147,6 +147,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
     # Re-check mode — it can change between depsgraph event and this call.
     if obj.mode != 'EDIT':
         return None, None, None, None, None
+    bm_copy = None
     try:
         bm_live = bmesh.from_edit_mesh(obj.data)
         bm_copy = bm_live.copy()
@@ -224,8 +225,8 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                 for i in range(1, len(loops) - 1):
                     uv1 = loops[i][uv_layer].uv
                     uv2 = loops[i + 1][uv_layer].uv
-                    coords += [p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)]
-                    colors += [col, col, col]
+                    coords.extend((p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)))
+                    colors.extend((col, col, col))
 
         id_batch = (
             batch_for_shader(shader, 'TRIS', {"pos": coords, "color": colors})
@@ -545,8 +546,8 @@ def _rebuild_hatch_from_cache(props):
                     _hatch_seg_cache[key] = segs
                 _miss += 1
             for p1, p2 in segs:
-                hatch_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
-                hatch_colors  += [hc, hc]
+                hatch_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
+                hatch_colors.extend((hc, hc))
         if fi in global_stack:
             if key is not None and key in _cross_hatch_seg_cache:
                 cross_segs = _cross_hatch_seg_cache[key]; _hits += 1
@@ -556,8 +557,8 @@ def _rebuild_hatch_from_cache(props):
                     _cross_hatch_seg_cache[key] = cross_segs
                 _miss += 1
             for p1, p2 in cross_segs:
-                checker_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
-                checker_colors  += [checker_col, checker_col]
+                checker_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
+                checker_colors.extend((checker_col, checker_col))
 
     for dead in [k for k in _hatch_seg_cache       if k not in live_keys]:
         del _hatch_seg_cache[dead]
@@ -577,6 +578,12 @@ def _rebuild_hatch_from_cache(props):
               f"stack={len(global_stack)} hits={_hits} miss={_miss}")
 
 
+def _island_in_tile0(isle):
+    cx = (isle.aabb[0] + isle.aabb[2]) * 0.5
+    cy = (isle.aabb[1] + isle.aabb[3]) * 0.5
+    return (max(0, math.floor(cx)) == 0 and max(0, math.floor(cy)) == 0)
+
+
 def _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
                           tile_crossing_flat, tiled):
     """Populate _inter_island_tris for the offscreen red fill pass."""
@@ -586,10 +593,7 @@ def _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
     inter_tris_raw = []
     n_unique       = 0
 
-    def _island_in_tile0(isle):
-        cx = (isle.aabb[0] + isle.aabb[2]) * 0.5
-        cy = (isle.aabb[1] + isle.aabb[3]) * 0.5
-        return (max(0, math.floor(cx)) == 0 and max(0, math.floor(cy)) == 0)
+
 
     if tiled:
         for fi in tile_crossing_flat:
@@ -809,8 +813,8 @@ def _rebuild_intersect_batches(props):
                     _hatch_seg_cache[key] = segs
                 _miss += 1
             for p1, p2 in segs:
-                hatch_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
-                hatch_colors  += [hc, hc]
+                hatch_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
+                hatch_colors.extend((hc, hc))
 
         if fi in global_stack:
             if key is not None and key in _cross_hatch_seg_cache:
@@ -822,8 +826,8 @@ def _rebuild_intersect_batches(props):
                     _cross_hatch_seg_cache[key] = cross_segs
                 _miss += 1
             for p1, p2 in cross_segs:
-                checker_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
-                checker_colors  += [checker_col, checker_col]
+                checker_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
+                checker_colors.extend((checker_col, checker_col))
 
     # Evict entries whose islands no longer exist or have moved (uv_key changed).
     for dead in [k for k in _hatch_seg_cache       if k not in live_keys]:
@@ -845,10 +849,7 @@ def _rebuild_intersect_batches(props):
     #   Pair both in tile 1+ → hatch only, no red fill
     #   UDIM mode → all inter islands, uv_key dedup to avoid double-drawing stacked pairs
 
-    def _island_in_tile0(isle):
-        cx = (isle.aabb[0] + isle.aabb[2]) * 0.5
-        cy = (isle.aabb[1] + isle.aabb[3]) * 0.5
-        return (max(0, math.floor(cx)) == 0 and max(0, math.floor(cy)) == 0)
+
 
     seen_norm_keys = set()
     inter_tris_raw = []
@@ -994,8 +995,8 @@ def _rebuild_intersect_opacity(props):
                 if key:
                     _hatch_seg_cache[key] = segs
             for p1, p2 in segs:
-                hatch_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
-                hatch_colors  += [hc, hc]
+                hatch_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
+                hatch_colors.extend((hc, hc))
         if fi in global_stack:
             cross = _cross_hatch_seg_cache.get(key) if key else None
             if cross is None:
@@ -1003,8 +1004,8 @@ def _rebuild_intersect_opacity(props):
                 if key:
                     _cross_hatch_seg_cache[key] = cross
             for p1, p2 in cross:
-                checker_coords += [(p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)]
-                checker_colors  += [checker_col, checker_col]
+                checker_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
+                checker_colors.extend((checker_col, checker_col))
 
     def _make(prim, coords, colors):
         return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else None

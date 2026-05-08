@@ -1,4 +1,10 @@
 import math
+from collections import Counter as _Counter
+
+try:
+    from . import utils
+except ImportError:
+    import utils
 
 EPSILON    = 1e-6
 UV_EPS     = 1e-4
@@ -627,10 +633,6 @@ def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
     if (prev_uv_key_hash == cur_uv_key_hash
             and prev_inter_idx is not None
             and prev_stack_idx is not None):
-        try:
-            from . import utils
-        except ImportError:
-            import utils
         utils.log("classify", "cache hit")
         return (prev_inter_idx, prev_stack_idx, cur_uv_key_hash,
                 prev_inter_pairs or frozenset(),
@@ -638,7 +640,6 @@ def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
                 prev_pair_cache or {})
 
     # Diff old vs new island keys to find what moved.
-    from collections import Counter as _Counter
     if prev_island_keys is not None:
         prev_counts = _Counter(k for k in prev_island_keys if k is not None)
         cur_counts  = _Counter(k for k in cur_island_keys  if k is not None)
@@ -657,10 +658,6 @@ def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
     )
     inter_idx = frozenset(idx for pk in island_pairs for idx in pk)
 
-    try:
-        from . import utils
-    except ImportError:
-        import utils
     _reused = sum(1 for ck in new_pair_cache
                   if prev_pair_cache and ck in prev_pair_cache)
     utils.log("classify", (
@@ -699,7 +696,6 @@ def classify_islands_cross(islands_a, islands_b,
                 prev_island_keys_b or cur_keys_b,
                 prev_pair_cache or {})
 
-    from collections import Counter as _Counter
     def _changed(prev_keys, cur_keys):
         if prev_keys is None:
             return set(cur_keys)
@@ -720,10 +716,6 @@ def classify_islands_cross(islands_a, islands_b,
         islands_a, islands_b, changed_a, changed_b, prev_pair_cache
     )
 
-    try:
-        from . import utils
-    except ImportError:
-        import utils
     _reused = sum(1 for ck in new_pair_cache
                   if prev_pair_cache and ck in prev_pair_cache)
     utils.log("classify_cross", (

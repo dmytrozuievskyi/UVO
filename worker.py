@@ -15,6 +15,7 @@ import struct
 import pickle
 import threading
 import time
+import traceback
 
 # PROTECT IPC PIPE FROM ROGUE PRINTS:
 # Blender does not drain stderr. Never print() directly to it, or the 
@@ -45,7 +46,7 @@ def _wlog(msg):
             pass
 
 
-# Pipe I/O 
+
 
 def _read_job(stream):
     header = stream.read(4)
@@ -65,7 +66,7 @@ def _write_result(stream, result):
     stream.flush()
 
 
-# Island reconstruction 
+
 
 def _deserialize_island(d, ix):
     """Reconstruct an intersect.Island from a serialized dict."""
@@ -85,7 +86,7 @@ def _deserialize_island(d, ix):
     return isle
 
 
-# classify_all handler 
+
 
 _worker_mesh_cache = {}  # {name: {'hash': int, 'islands': list, 'det_islands': list}}
 
@@ -99,7 +100,7 @@ def _handle_classify_all(job, ix):
 
     t0 = time.perf_counter()
 
-    # Deserialize / pull from cache 
+
     active_names = {od['name'] for od in obj_data}
     for name in list(_worker_mesh_cache.keys()):
         if name not in active_names:
@@ -137,7 +138,7 @@ def _handle_classify_all(job, ix):
     _wlog(f"job {job_id}: deserialize done {(time.perf_counter()-t0)*1000:.0f}ms "
           f"— {len(objects)} objs tiled={tiled}")
 
-    # Self-classify each object 
+
     self_results = {}
     for obj in objects:
         p    = obj['prev_self']
@@ -171,7 +172,7 @@ def _handle_classify_all(job, ix):
             'pair_cache':  pcache,
         }
 
-    # Cross-classify each pair
+
     cross_results = {}
     n = len(objects)
     for i in range(n):
@@ -222,7 +223,7 @@ def _handle_classify_all(job, ix):
     }
 
 
-# Main loop
+
 
 def _process_job(job, ix):
     job_type = job.get('type')
@@ -261,6 +262,7 @@ def main():
 
     _wlog(f"addon_dir={addon_dir}")
 
+    _ix_err = None
     try:
         import intersect as ix
         _wlog("intersect imported OK")
@@ -268,6 +270,10 @@ def main():
         ix      = None
         _ix_err = str(e)
         _wlog(f"intersect import FAILED: {e}")
+    except Exception as e:
+        ix      = None
+        _ix_err = f"Unexpected error: {e}"
+        _wlog(f"intersect import FAILED (unexpected): {e}")
 
     stdin = sys.stdin.buffer
 
@@ -293,7 +299,6 @@ def main():
                 else:
                     result_box[0] = _process_job(job, ix)
             except Exception as e:
-                import traceback
                 error_box[0] = (str(e), traceback.format_exc())
 
         t       = threading.Thread(target=_run, daemon=True)

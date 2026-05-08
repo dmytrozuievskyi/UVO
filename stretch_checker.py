@@ -1,5 +1,6 @@
 import gpu
 import math
+import traceback
 from gpu_extras.batch import batch_for_shader
 from . import stretch
 
@@ -336,7 +337,6 @@ def build_geometry_batch(obj_cache, props):
             "color": colors
         })
     except Exception as e:
-        import traceback
         print(f"[UVO] stretch_checker batch error: {e}")
         traceback.print_exc()
         return None

@@ -233,6 +233,11 @@ preview_collections = {}
 
 def update_debug_pref(self, context):
     """Restart the worker dynamically if the user changes the debug toggle."""
+    try:
+        from . import utils
+        utils._cached_debug = self.debug
+    except Exception:
+        pass
     stop_worker()
     start_worker()
 

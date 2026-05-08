@@ -105,36 +105,58 @@ def update_padding_settings(self, context):
                 area.tag_redraw()
 
 
-def update_tex_res_x(self, context):
-    if self.tex_res_linked:
-        self.tex_res_y = self.tex_res_x
+_is_syncing_tex = False
+
+
+def _propagate_tex_res(self, context):
+    """Copy texture resolution from active object to all other selected objects."""
+    global _is_syncing_tex
+    if _is_syncing_tex:
+        return
+    _is_syncing_tex = True
+    try:
+        active = context.active_object
+        for obj in context.selected_objects:
+            if obj != active and hasattr(obj, 'uv_id_props'):
+                op = obj.uv_id_props
+                op.tex_res_x = self.tex_res_x
+                op.tex_res_y = self.tex_res_y
+                op.tex_res_linked = self.tex_res_linked
+    finally:
+        _is_syncing_tex = False
+
+
+def _sync_tex_cache_and_rebuild(self, context):
+    """Sync all object tex_w/tex_h caches then rebuild padding & stretch."""
+    from . import draw
+    for obj in context.scene.objects:
+        if obj.name in draw._obj_cache and hasattr(obj, 'uv_id_props'):
+            draw._obj_cache[obj.name]['tex_w'] = float(obj.uv_id_props.tex_res_x)
+            draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
+
     update_padding_settings(self, context)
-    
-    # Update stretch overlay
+
     props = context.scene.uv_id_props
     if props.show_stretch:
-        from . import draw, stretch
-        for obj in context.scene.objects:
-            if obj.name in draw._obj_cache and hasattr(obj, 'uv_id_props'):
-                draw._obj_cache[obj.name]['tex_w'] = float(obj.uv_id_props.tex_res_x)
-                draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
+        from . import stretch
         stretch.rebuild(props, draw._obj_cache, context)
         draw.tag_redraw(context)
+
+
+def update_tex_res_x(self, context):
+    if _is_syncing_tex:
+        return
+    if self.tex_res_linked:
+        self.tex_res_y = self.tex_res_x
+    _propagate_tex_res(self, context)
+    _sync_tex_cache_and_rebuild(self, context)
 
 
 def update_tex_res_y(self, context):
-    update_padding_settings(self, context)
-    
-    # Update stretch overlay
-    props = context.scene.uv_id_props
-    if props.show_stretch:
-        from . import draw, stretch
-        for obj in context.scene.objects:
-            if obj.name in draw._obj_cache and hasattr(obj, 'uv_id_props'):
-                draw._obj_cache[obj.name]['tex_w'] = float(obj.uv_id_props.tex_res_x)
-                draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
-        stretch.rebuild(props, draw._obj_cache, context)
-        draw.tag_redraw(context)
+    if _is_syncing_tex:
+        return
+    _propagate_tex_res(self, context)
+    _sync_tex_cache_and_rebuild(self, context)
 
 
 def update_stretch(self, context):
@@ -189,9 +211,21 @@ def update_stretch_target_texel(self, context):
             self.stretch_internal_texel = val * 100.0
         else:
             self.stretch_internal_texel = val
-            
+
+        # Propagate to all selected objects
+        active = context.active_object
+        for obj in context.selected_objects:
+            if obj != active and hasattr(obj, 'uv_id_props'):
+                op = obj.uv_id_props
+                op.stretch_target_texel = self.stretch_target_texel
+                op.stretch_internal_texel = self.stretch_internal_texel
+                op.stretch_texel_unit = self.stretch_texel_unit
+
         if _texel_timer_fn is not None:
-            bpy.app.timers.unregister(_texel_timer_fn)
+            try:
+                bpy.app.timers.unregister(_texel_timer_fn)
+            except ValueError:
+                pass
         _texel_timer_fn = _do_texel_update
         bpy.app.timers.register(_texel_timer_fn, first_interval=0.2)
     finally:
@@ -209,6 +243,15 @@ def update_stretch_texel_unit(self, context):
             self.stretch_target_texel = internal / 100.0
         else:
             self.stretch_target_texel = internal
+
+        # Propagate to all selected objects
+        active = context.active_object
+        for obj in context.selected_objects:
+            if obj != active and hasattr(obj, 'uv_id_props'):
+                op = obj.uv_id_props
+                op.stretch_texel_unit = self.stretch_texel_unit
+                op.stretch_target_texel = self.stretch_target_texel
+                op.stretch_internal_texel = self.stretch_internal_texel
     finally:
         _is_updating_texel = False
 
