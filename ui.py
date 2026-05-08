@@ -108,6 +108,26 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
         layout.separator()
         layout.prop(props, "live_update", text="Live Update")
 
+        # Warn when selected objects have mismatched per-object texture settings.
+        if props.show_stretch or props.show_padding:
+            sel = [o for o in context.selected_objects if hasattr(o, 'uv_id_props')]
+            if len(sel) > 1:
+                ref = sel[0].uv_id_props
+                mismatch = False
+                for obj in sel[1:]:
+                    op = obj.uv_id_props
+                    if (op.tex_res_x != ref.tex_res_x
+                            or op.tex_res_y != ref.tex_res_y
+                            or op.stretch_internal_texel != ref.stretch_internal_texel):
+                        mismatch = True
+                        break
+                if mismatch:
+                    layout.separator()
+                    warn = layout.row(align=True)
+                    warn.alert = True
+                    warn.label(text="Objects have different texture settings",
+                               icon='ERROR')
+
 
 def draw_header_button(self, context):
     if context.space_data.type != 'IMAGE_EDITOR':
