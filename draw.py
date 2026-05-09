@@ -274,11 +274,15 @@ def _serialize_islands_for_worker(tiled):
                     for s in isle.boundary_segs
                 ]
                 ser_islands.append({
-                    'flat_tris':   flat_tris,
-                    'flat_segs':   flat_segs,
-                    'color':       isle.color,
-                    'object_name': isle.object_name,
-                    'uv_key':      isle.uv_key,
+                    'flat_tris':    flat_tris,
+                    'flat_segs':    flat_segs,
+                    'color':        isle.color,
+                    'object_name':  isle.object_name,
+                    'uv_key':       isle.uv_key,
+                    'jacobians':    isle.jacobians,
+                    'uv_area':      isle.uv_area,
+                    'surface_area': isle.surface_area,
+                    'aabb':         isle.aabb,
                 })
             if pkg:
                 pkg.mark_synced(name, cur_hash)
