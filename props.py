@@ -317,15 +317,6 @@ class UVIDProperties(bpy.types.PropertyGroup):
         description="Temporarily hide all overlays without changing settings",
         update=update_mute,
     )
-    live_update: bpy.props.BoolProperty(
-        default=False,
-        name="Live Update",
-        description=(
-            "Update overlays on every UV change.\n"
-            "Disable for smoother editing on complex meshes — "
-            "overlays will update once after each action completes"
-        ),
-    )
     show_uv_id: bpy.props.BoolProperty(
         default=False,
         name="UV ID",

@@ -106,7 +106,6 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
         split_str.prop(props, "stretch_opacity", text="", slider=True)
 
         layout.separator()
-        layout.prop(props, "live_update", text="Live Update")
 
         # Warn when selected objects have mismatched per-object texture settings.
         if props.show_stretch or props.show_padding:

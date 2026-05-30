@@ -1246,21 +1246,12 @@ def depsgraph_update_handler(scene, depsgraph):
             except Exception:
                 pass
 
-    if prop.live_update:
-        if prop.show_stretch:
-            if not _obj_cache:
-                _do_rebuild()
-            else:
-                _schedule_debounce()
-        else:
-            _do_rebuild()
+    # Empty cache means we just entered edit mode — rebuild immediately
+    # rather than waiting for the debounce delay.
+    if not _obj_cache:
+        _do_rebuild()
     else:
-        # Empty cache means we just entered edit mode — rebuild immediately
-        # rather than waiting for the debounce delay.
-        if not _obj_cache:
-            _do_rebuild()
-        else:
-            _schedule_debounce()
+        _schedule_debounce()
 
 
 def draw_callback():
