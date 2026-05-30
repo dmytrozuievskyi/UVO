@@ -29,6 +29,12 @@ def mark_synced(name, obj_hash):
 def clear_synced_objects():
     _worker_synced_objects.clear()
 
+def evict_stale_synced_objects(active_names):
+    """Evict hashes for objects no longer in the active set, matching the worker's cache clearing."""
+    stale = [name for name in _worker_synced_objects if name not in active_names]
+    for name in stale:
+        del _worker_synced_objects[name]
+
 
 def _write_job(proc, job):
     """Send a job dict to the worker via its stdin pipe."""

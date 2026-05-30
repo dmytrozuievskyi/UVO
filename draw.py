@@ -260,6 +260,9 @@ def _serialize_islands_for_worker(tiled):
     import sys as _sys
     pkg = _sys.modules.get(__package__)
 
+    if pkg and hasattr(pkg, 'evict_stale_synced_objects'):
+        pkg.evict_stale_synced_objects(set(_obj_cache.keys()))
+
     objects = []
     for name, cache in _obj_cache.items():
         islands = cache.get('islands') or []
@@ -414,11 +417,18 @@ def _start_result_poller():
             if rtype == 'error':
                 utils.log("async", f"worker error: {result.get('msg')}")
             elif rtype == 'compute_result':
+                is_latest = False
                 if rid == _classify_job_id:
                     _classify_job_id = 0
+                    is_latest = True
                 if rid == _stretch_job_id:
                     _stretch_job_id = 0
-                _apply_worker_result(result)
+                    is_latest = True
+                
+                if is_latest:
+                    _apply_worker_result(result)
+                else:
+                    utils.log("async", f"discarding obsolete result job_id={rid}")
             else:
                 utils.log("async", f"discarding stale/unknown result type={rtype} id={rid}")
 
