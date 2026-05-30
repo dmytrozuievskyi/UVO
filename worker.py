@@ -1,18 +1,19 @@
 """
-Background worker process for UV island classification.
+Background worker process for UVO overlay computation.
 
 Run as standalone script: python worker.py <addon_dir>
 Communication: stdin/stdout with length-prefixed pickle frames.
 
 Job types:
-    ping          -> pong
-    classify_all  -> classify_all_result
+    ping     -> pong
+    compute  -> compute_result   (unified: classify + stretch in one pass)
 """
 
 import sys
 import os
 import struct
 import pickle
+import math
 import threading
 import time
 import traceback
@@ -99,61 +100,13 @@ _worker_mesh_cache = {}  # {name: {'hash': int, 'islands': list, 'det_islands': 
 _stretch_cache     = {}  # {name: [(cache_key, result), ...]}  per-island stretch results
 
 
-def _handle_classify_all(job, ix):
-    """Run full self + cross classify for all objects in the job."""
-    tiled      = job.get('tiled', True)
-    obj_data   = job.get('objects', [])
-    cross_prev = job.get('cross_prev', {})
-    job_id     = job.get('id', '?')
-
-    t0 = time.perf_counter()
-
-
-    active_names = {od['name'] for od in obj_data}
-    for name in list(_worker_mesh_cache.keys()):
-        if name not in active_names:
-            del _worker_mesh_cache[name]
-
-    objects = []
-    for od in obj_data:
-        raw_islands = od.get('islands')
-        name = od['name']
-        h    = od['hash']
-
-        if raw_islands is not None:
-            islands = [_deserialize_island(d, ix) for d in raw_islands]
-            det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
-            _worker_mesh_cache[name] = {'hash': h, 'islands': islands,
-                                        'det_islands': det_islands}
-        else:
-            cached = _worker_mesh_cache.get(name)
-            if not cached or cached['hash'] != h:
-                _wlog(f"job {job_id}: cache miss for '{name}' hash={h}")
-                islands     = []
-                det_islands = []
-            else:
-                islands     = cached['islands']
-                det_islands = cached['det_islands']
-
-        objects.append({
-            'name':        name,
-            'hash':        h,
-            'islands':     islands,
-            'det_islands': det_islands,
-            'prev_self':   od.get('prev_self', {}),
-        })
-
-    _wlog(f"job {job_id}: deserialize done {(time.perf_counter()-t0)*1000:.0f}ms "
-          f"— {len(objects)} objs tiled={tiled}")
-
-
+def _run_classify(objects, cross_prev, tiled, job_id, ix):
+    """Run self + cross classify for all objects. Returns (self_results, cross_results)."""
     self_results = {}
     for obj in objects:
         p    = obj['prev_self']
         name = obj['name']
-        n_isl = len(obj['det_islands'])
-        _wlog(f"job {job_id}: SELF '{name}' ({n_isl} islands, "
-              f"has_prev={p.get('inter_idx') is not None})")
+        _wlog(f"job {job_id}: SELF '{name}' ({len(obj['det_islands'])} islands)")
         t1 = time.perf_counter()
 
         inter_idx, stack_idx, uv_kh, i_pairs, ikeys, pcache = ix.classify_islands(
@@ -165,7 +118,6 @@ def _handle_classify_all(job, ix):
             prev_island_keys = p.get('island_keys'),
             prev_pair_cache  = p.get('pair_cache'),
         )
-
         _wlog(f"job {job_id}: SELF done '{name}' "
               f"{(time.perf_counter()-t1)*1000:.0f}ms — "
               f"inter={len(inter_idx)} stack={len(stack_idx)}")
@@ -180,19 +132,15 @@ def _handle_classify_all(job, ix):
             'pair_cache':  pcache,
         }
 
-
     cross_results = {}
     n = len(objects)
     for i in range(n):
         for j in range(i + 1, n):
-            oa, ob = objects[i], objects[j]
-            na, nb = oa['name'], ob['name']
+            oa, ob   = objects[i], objects[j]
+            na, nb   = oa['name'], ob['name']
             pair_key = (na, nb) if na <= nb else (nb, na)
-            p = cross_prev.get(pair_key, {})
-            _wlog(f"job {job_id}: CROSS '{na}'({len(oa['det_islands'])}) x "
-                  f"'{nb}'({len(ob['det_islands'])}) "
-                  f"has_prev={p.get('inter_a') is not None}")
-            t2 = time.perf_counter()
+            p        = cross_prev.get(pair_key, {})
+            t2       = time.perf_counter()
 
             r_a, r_b, s_a, s_b, uv_h, i_pairs, ckeys_a, ckeys_b, cpcache = \
                 ix.classify_islands_cross(
@@ -207,7 +155,6 @@ def _handle_classify_all(job, ix):
                     prev_island_keys_b = p.get('island_keys_b'),
                     prev_pair_cache    = p.get('pair_cache'),
                 )
-
             _wlog(f"job {job_id}: CROSS done '{na}'x'{nb}' "
                   f"{(time.perf_counter()-t2)*1000:.0f}ms — "
                   f"inter_a={len(r_a)} inter_b={len(r_b)}")
@@ -221,16 +168,145 @@ def _handle_classify_all(job, ix):
                 'pair_cache':    cpcache,
             }
 
+    return self_results, cross_results
+
+
+def _run_stretch(objects, job_id):
+    """Compute stretch overlay for all objects. Returns stretch_results dict.
+
+    Uses _stretch_cache for per-island result caching (keyed by uv_key + tex settings).
+    _worker_mesh_cache must already be populated before calling.
+    """
+    stretch_results = {}
+    total_cached = total_computed = 0
+
+    for obj in objects:
+        name     = obj['name']
+        tex_w    = obj.get('tex_w') or 1024.0
+        tex_h    = obj.get('tex_h') or 1024.0
+        target_tx = obj.get('target_texel') or 0.0
+
+        islands = obj['islands']
+        if not islands:
+            continue
+
+        prev_by_key = {ck: res for ck, res in _stretch_cache.get(name, [])}
+
+        new_isle_cache     = []
+        all_coords         = []
+        all_warped         = []
+        all_checker_colors = []
+        all_heatmap_colors = []
+
+        for isle in islands:
+            cache_key     = (isle.uv_key, tex_w, tex_h, target_tx)
+            cached_result = prev_by_key.get(cache_key)
+
+            if cached_result is not None:
+                total_cached += 1
+                r = cached_result
+            else:
+                total_computed += 1
+                co, wuv, chk, hm = _stretch_compute_island(isle, tex_w, tex_h, target_tx)
+                r = {'coords': co, 'warped_uvs': wuv,
+                     'checker_colors': chk, 'heatmap_colors': hm}
+
+            new_isle_cache.append((cache_key, r))
+            all_coords.extend(r['coords'])
+            all_warped.extend(r['warped_uvs'])
+            all_checker_colors.extend(r['checker_colors'])
+            all_heatmap_colors.extend(r['heatmap_colors'])
+
+        _stretch_cache[name] = new_isle_cache
+        stretch_results[name] = {
+            'coords':         all_coords,
+            'warped_uvs':     all_warped,
+            'checker_colors': all_checker_colors,
+            'heatmap_colors': all_heatmap_colors,
+        }
+
+    _wlog(f"job {job_id}: stretch computed={total_computed} cached={total_cached}")
+    return stretch_results
+
+
+def _handle_compute(job, ix):
+    """Unified handler: sync mesh cache, then run classify and/or stretch.
+
+    Step 1 — Delta-IPC: deserialize any changed island data into _worker_mesh_cache.
+    Step 2 — Classify:  run if do_classify=True, returns self/cross results.
+    Step 3 — Stretch:   run if do_stretch=True, returns per-object vertex data.
+
+    Both computations share the same (already-synced) island data, so there is
+    no race between them and no stale-data risk.
+    """
+    obj_data    = job.get('objects', [])
+    job_id      = job.get('id', '?')
+    tiled       = job.get('tiled', True)
+    cross_prev  = job.get('cross_prev', {})
+    do_classify = job.get('do_classify', False)
+    do_stretch  = job.get('do_stretch', False)
+
+    t0 = time.perf_counter()
+
+    # ── Step 1: Sync _worker_mesh_cache (Delta-IPC) ──────────────────────────
+    active_names = {od['name'] for od in obj_data}
+    for name in list(_worker_mesh_cache):
+        if name not in active_names:
+            del _worker_mesh_cache[name]
+    for name in list(_stretch_cache):
+        if name not in active_names:
+            del _stretch_cache[name]
+
+    objects = []
+    for od in obj_data:
+        raw_islands = od.get('islands')
+        name        = od['name']
+        h           = od['hash']
+
+        if raw_islands is not None:
+            islands     = [_deserialize_island(d, ix) for d in raw_islands]
+            det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
+            _worker_mesh_cache[name] = {'hash': h, 'islands': islands,
+                                        'det_islands': det_islands}
+            _wlog(f"job {job_id}: synced '{name}' ({len(islands)} islands)")
+        else:
+            cached = _worker_mesh_cache.get(name)
+            if cached and cached['hash'] == h:
+                islands     = cached['islands']
+                det_islands = cached['det_islands']
+            else:
+                _wlog(f"job {job_id}: cache miss '{name}' hash={h}")
+                islands     = []
+                det_islands = []
+
+        objects.append({
+            'name':        name,
+            'hash':        h,
+            'islands':     islands,
+            'det_islands': det_islands,
+            'prev_self':   od.get('prev_self', {}),
+            'tex_w':       od.get('tex_w'),
+            'tex_h':       od.get('tex_h'),
+            'target_texel': od.get('target_texel'),
+        })
+
+    _wlog(f"job {job_id}: sync done {(time.perf_counter()-t0)*1000:.0f}ms "
+          f"— {len(objects)} objs classify={do_classify} stretch={do_stretch}")
+
+    result = {'id': job_id, 'type': 'compute_result'}
+
+    # ── Step 2: Classify ──────────────────────────────────────────────────────
+    if do_classify:
+        self_r, cross_r = _run_classify(objects, cross_prev, tiled, job_id, ix)
+        result['self_results']  = self_r
+        result['cross_results'] = cross_r
+
+    # ── Step 3: Stretch ───────────────────────────────────────────────────────
+    if do_stretch:
+        result['stretch_results'] = _run_stretch(objects, job_id)
+
     _wlog(f"job {job_id}: COMPLETE {(time.perf_counter()-t0)*1000:.0f}ms total")
-
-    return {
-        'id':            job_id,
-        'type':          'classify_all_result',
-        'self_results':  self_results,
-        'cross_results': cross_results,
-    }
-
-
+    return result
 
 
 def _process_job(job, ix):
@@ -239,11 +315,8 @@ def _process_job(job, ix):
     if job_type == 'ping':
         return {'id': job.get('id'), 'type': 'pong'}
 
-    if job_type == 'classify_all':
-        return _handle_classify_all(job, ix)
-
-    if job_type == 'stretch_compute':
-        return _handle_stretch_compute(job)
+    if job_type == 'compute':
+        return _handle_compute(job, ix)
 
     return {'id': job.get('id'), 'type': 'error', 'msg': f'unknown: {job_type!r}'}
 
@@ -472,81 +545,7 @@ def _stretch_compute_island(isle, tex_w, tex_h, target_texel):
     return coords, warped_uvs, checker_list, heatmap_list
 
 
-def _handle_stretch_compute(job):
-    """Compute stretch overlay data for all objects in the job."""
-    global _stretch_cache
-    obj_data = job.get('objects', [])
-    job_id   = job.get('id', '?')
-    t0 = time.perf_counter()
 
-    active_names = {od['name'] for od in obj_data}
-    for name in list(_stretch_cache.keys()):
-        if name not in active_names:
-            del _stretch_cache[name]
-
-    results = {}
-    total_cached = 0
-    total_computed = 0
-
-    for od in obj_data:
-        name      = od['name']
-        tex_w     = od.get('tex_w', 1024.0)
-        tex_h     = od.get('tex_h', 1024.0)
-        target_tx = od.get('target_texel', 0.0)
-
-        cached_mesh = _worker_mesh_cache.get(name)
-        if not cached_mesh:
-            continue
-        islands = cached_mesh['islands']
-        if not islands:
-            continue
-
-        prev_isle_cache = _stretch_cache.get(name, [])
-        prev_by_key = {ck: res for ck, res in prev_isle_cache}
-
-        new_isle_cache = []
-        all_coords = []
-        all_warped = []
-        all_checker_colors = []
-        all_heatmap_colors = []
-
-        for isle in islands:
-            cache_key = (isle.uv_key, tex_w, tex_h, target_tx)
-            cached_result = prev_by_key.get(cache_key)
-
-            if cached_result is not None:
-                total_cached += 1
-                r = cached_result
-            else:
-                total_computed += 1
-                co, wuv, chk, hm = _stretch_compute_island(isle, tex_w, tex_h, target_tx)
-                r = {'coords': co, 'warped_uvs': wuv,
-                     'checker_colors': chk, 'heatmap_colors': hm}
-
-            new_isle_cache.append((cache_key, r))
-            all_coords.extend(r['coords'])
-            all_warped.extend(r['warped_uvs'])
-            all_checker_colors.extend(r['checker_colors'])
-            all_heatmap_colors.extend(r['heatmap_colors'])
-
-        _stretch_cache[name] = new_isle_cache
-
-        results[name] = {
-            'coords':          all_coords,
-            'warped_uvs':      all_warped,
-            'checker_colors':  all_checker_colors,
-            'heatmap_colors':  all_heatmap_colors,
-        }
-
-    elapsed = (time.perf_counter() - t0) * 1000
-    _wlog(f"stretch job {job_id}: {elapsed:.0f}ms  "
-          f"computed={total_computed} cached={total_cached}")
-
-    return {
-        'id':      job_id,
-        'type':    'stretch_result',
-        'results': results,
-    }
 
 
 def main():

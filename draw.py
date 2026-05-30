@@ -35,9 +35,10 @@ _inter_threshold = 0.6
 
 _shader = None
 
-# Async classify tracking
-_classify_job_id    = 0   # id of the most recently dispatched classify job
-_classify_timer_fn  = None  # bpy timer reference
+# Async job tracking
+_classify_job_id   = 0     # id of the most recently dispatched classify job
+_stretch_job_id    = 0     # id of the most recently dispatched stretch job
+_result_timer_fn   = None  # unified bpy timer for polling worker results
 
 # Sentinel: pre-pass failed for this object — use n=1 fallback, keeping
 # palette offsets consistent with what the pre-pass recorded.
@@ -81,12 +82,18 @@ def _cancel_debounce():
 
 def full_refresh(context):
     """Clear all caches and rebuild. Call when settings change (opacity, mode, etc.)."""
-    _cancel_classify_timer()
+    _cancel_result_poller()
     _obj_cache.clear()
     _isect_self_cache.clear()
     _isect_cross_cache.clear()
     _hatch_seg_cache.clear()
     _cross_hatch_seg_cache.clear()
+    
+    import sys as _sys
+    pkg = _sys.modules.get(__package__)
+    if pkg:
+        pkg.clear_synced_objects()
+        
     update_batches_safe(context)
     props = context.scene.uv_id_props
     if props.show_padding and not props.is_muted:
@@ -319,132 +326,134 @@ def _serialize_islands_for_worker(tiled):
     return objects, cross_prev
 
 
-def _dispatch_classify_job(props):
-    """Serialize island data and send a classify_all job to the worker.
+def _dispatch_worker_job(props):
+    """Unified dispatch — syncs island data (Delta-IPC) and requests active computations.
 
-    Returns True if the job was dispatched, False if the worker is unavailable.
+    Sends a single 'compute' job to the worker containing:
+    - Serialized island data (or null for unchanged objects — Delta-IPC)
+    - do_classify / do_stretch flags based on which overlays are active
+    - tex settings per object (for stretch)
+
+    Returns True if dispatched, False if worker unavailable.
     """
-    global _classify_job_id
+    global _classify_job_id, _stretch_job_id
     import sys as _sys
     pkg = _sys.modules.get(__package__)
     if pkg is None:
         return False
 
+    do_classify = props.show_intersect and not props.is_muted
+    do_stretch  = props.show_stretch  and not props.is_muted
+
+    # Always sync island data regardless of which computation is requested.
     tiled = (props.intersect_uv_mode == 'TILED')
     objects, cross_prev = _serialize_islands_for_worker(tiled)
 
+    # Attach stretch tex settings to each object entry.
+    if do_stretch:
+        for obj_entry in objects:
+            cache = _obj_cache.get(obj_entry['name'])
+            if cache:
+                obj_entry['tex_w']        = cache.get('tex_w', 1024.0)
+                obj_entry['tex_h']        = cache.get('tex_h', 1024.0)
+                obj_entry['target_texel'] = cache.get('target_texel', 0.0)
+
     job_id = pkg.next_job_id()
-    _classify_job_id = job_id
+    # Both job-id slots share the same id — one job, one result.
+    if do_classify:
+        _classify_job_id = job_id
+    if do_stretch:
+        _stretch_job_id = job_id
 
     ok = pkg.send_job({
-        'id':         job_id,
-        'type':       'classify_all',
-        'tiled':      tiled,
-        'objects':    objects,
-        'cross_prev': cross_prev,
+        'id':          job_id,
+        'type':        'compute',
+        'objects':     objects,
+        'tiled':       tiled,
+        'cross_prev':  cross_prev if do_classify else {},
+        'do_classify': do_classify,
+        'do_stretch':  do_stretch,
     })
-    utils.log("async", f"classify job dispatched id={job_id} ok={ok}")
+    utils.log("async", f"worker job dispatched id={job_id} ok={ok} "
+              f"classify={do_classify} stretch={do_stretch}")
     return ok
 
 
-def _start_classify_timer():
-    """Register a repeating timer to poll for classify results."""
-    global _classify_timer_fn
-    _cancel_classify_timer()
+def _start_result_poller():
+    """Start or keep alive a unified timer that polls for any worker result."""
+    global _result_timer_fn
+    if _result_timer_fn is not None:
+        return  # already running
 
     def _poll():
-        global _classify_timer_fn
+        global _result_timer_fn, _classify_job_id, _stretch_job_id
         import sys as _sys
         pkg = _sys.modules.get(__package__)
         if pkg is None:
-            _classify_timer_fn = None
+            _result_timer_fn = None
             return None
 
         rq = pkg.get_result_queue()
         if rq is None:
-            _classify_timer_fn = None
+            _result_timer_fn = None
             return None
 
-        try:
-            result = rq.get_nowait()
-        except Exception:
-            # Nothing ready yet — check again later.
+        # Drain all available results in one tick — prevents queue build-up
+        # when classify and stretch results arrive close together.
+        got_any = False
+        while True:
+            try:
+                result = rq.get_nowait()
+            except Exception:
+                break  # queue empty
+
+            got_any = True
+            rtype = result.get('type')
+            rid   = result.get('id')
+
+            if rtype == 'error':
+                utils.log("async", f"worker error: {result.get('msg')}")
+            elif rtype == 'compute_result':
+                if rid == _classify_job_id:
+                    _classify_job_id = 0
+                if rid == _stretch_job_id:
+                    _stretch_job_id = 0
+                _apply_worker_result(result)
+            else:
+                utils.log("async", f"discarding stale/unknown result type={rtype} id={rid}")
+
+        if not got_any:
+            # Nothing ready — keep polling if jobs are still in flight
+            if _classify_job_id == 0 and _stretch_job_id == 0:
+                _result_timer_fn = None
+                return None
             return 0.05
 
-        if result.get('type') == 'error':
-            utils.log("async", f"worker error: {result.get('msg')}")
-            _classify_timer_fn = None
-            return None
+        # Processed at least one result — stop if no more pending jobs
+        if _classify_job_id != 0 or _stretch_job_id != 0:
+            return 0.05
 
-        if result.get('type') != 'classify_all_result':
-            # ping/pong or unknown — put back and stop timer
-            _classify_timer_fn = None
-            return None
+        _result_timer_fn = None
+        return None
 
-        job_id = result.get('id')
-        if job_id != _classify_job_id:
-            utils.log("async", f"discarding stale result id={job_id}")
-            return 0.05   # keep polling — our result may still be coming
-
-        _apply_classify_result(result)
-        _classify_timer_fn = None
-        return None  # unregister timer
-
-    _classify_timer_fn = _poll
+    _result_timer_fn = _poll
     bpy.app.timers.register(_poll, first_interval=0.05)
 
 
-def _cancel_classify_timer():
-    global _classify_timer_fn
-    if _classify_timer_fn is not None:
+def _cancel_result_poller():
+    global _result_timer_fn, _classify_job_id, _stretch_job_id
+    if _result_timer_fn is not None:
         try:
-            bpy.app.timers.unregister(_classify_timer_fn)
+            bpy.app.timers.unregister(_result_timer_fn)
         except Exception:
             pass
-        _classify_timer_fn = None
+        _result_timer_fn = None
+    _classify_job_id = 0
+    _stretch_job_id = 0
 
 
-def _apply_classify_result(result):
-    """Apply a classify_all_result from the worker to the local caches.
-
-    Rebuilds hatch/checker batches and triggers a redraw. Called from the
-    polling timer — always on the main thread.
-    """
-    self_results  = result.get('self_results', {})
-    cross_results = result.get('cross_results', {})
-
-    # Update self-cache
-    for name, entry in self_results.items():
-        if name in _obj_cache:
-            _isect_self_cache[name] = entry
-
-    # Update cross-cache
-    for pair_key, entry in cross_results.items():
-        _isect_cross_cache[pair_key] = entry
-
-    # Evict stale entries for objects no longer in cache
-    for name in list(_isect_self_cache):
-        if name not in _obj_cache:
-            del _isect_self_cache[name]
-    active_pairs = set()
-    names = list(_obj_cache.keys())
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            na, nb = names[i], names[j]
-            active_pairs.add((na, nb) if na <= nb else (nb, na))
-    for pk in list(_isect_cross_cache):
-        if pk not in active_pairs:
-            del _isect_cross_cache[pk]
-
-    # Check if any active overlay prop is available
-    try:
-        props = bpy.context.scene.uv_id_props
-    except Exception:
-        return
-
-    if props.show_intersect and not props.is_muted:
-        _rebuild_hatch_from_cache(props)
-
+def _tag_redraw():
+    """Ask all IMAGE_EDITOR areas to repaint."""
     try:
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
@@ -453,7 +462,59 @@ def _apply_classify_result(result):
     except Exception:
         pass
 
-    utils.log("async", f"classify result applied, job_id={result.get('id')}")
+
+def _apply_worker_result(result):
+    """Apply a compute_result from the worker.
+
+    Handles both classify and stretch portions — each is only applied
+    if the corresponding key is present in the result dict.
+    Called from the polling timer, always on the main thread.
+    """
+    job_id = result.get('id')
+
+    # ── Apply classify portion ───────────────────────────────────────────
+    if 'self_results' in result:
+        self_results  = result.get('self_results', {})
+        cross_results = result.get('cross_results', {})
+
+        for name, entry in self_results.items():
+            if name in _obj_cache:
+                _isect_self_cache[name] = entry
+
+        for pair_key, entry in cross_results.items():
+            _isect_cross_cache[pair_key] = entry
+
+        # Evict stale entries for objects no longer in cache
+        for name in list(_isect_self_cache):
+            if name not in _obj_cache:
+                del _isect_self_cache[name]
+        active_pairs = set()
+        names = list(_obj_cache.keys())
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                na, nb = names[i], names[j]
+                active_pairs.add((na, nb) if na <= nb else (nb, na))
+        for pk in list(_isect_cross_cache):
+            if pk not in active_pairs:
+                del _isect_cross_cache[pk]
+
+        try:
+            props = bpy.context.scene.uv_id_props
+            if props.show_intersect and not props.is_muted:
+                _rebuild_hatch_from_cache(props)
+        except Exception:
+            pass
+
+        utils.log("async", f"classify result applied, job_id={job_id}")
+
+    # ── Apply stretch portion ───────────────────────────────────────────
+    if 'stretch_results' in result:
+        stretch_data = result.get('stretch_results', {})
+        if stretch_data:
+            stretch.rebuild_from_worker_data(stretch_data)
+        utils.log("async", f"stretch result applied, job_id={job_id}")
+
+    _tag_redraw()
 
 
 def _rebuild_hatch_from_cache(props):
@@ -646,23 +707,12 @@ def _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
 
 
 def _rebuild_intersect_batches(props):
-    """Classify islands and rebuild hatch/checker batches.
-
-    If the background worker is available, dispatches the classify job
-    asynchronously and returns immediately — results arrive via _apply_classify_result.
-    Falls back to synchronous classify if the worker is not running.
-    """
+    """Classify islands and rebuild hatch/checker batches (synchronous fallback)."""
     global _inter_island_tris
 
     _t0 = time.perf_counter()
 
-    # Try async path first 
-    if _dispatch_classify_job(props):
-        _start_classify_timer()
-        utils.log("async", "classify dispatched to worker — returning immediately")
-        return
-
-    utils.log("async", "worker unavailable — falling back to sync classify")
+    utils.log("async", "sync classify fallback")
 
     # Synchronous fallback
     shader   = _get_shader()
@@ -1100,24 +1150,34 @@ def update_batches_safe(context):
                         del _isect_cross_cache[pk]
                 any_changed = True
 
-        if props.show_intersect and not props.is_muted:
-            if any_changed or (_intersect_batches['hatch'] is None and _classify_timer_fn is None):
-                _rebuild_intersect_batches(props)
-        else:
-            _intersect_batches['hatch'] = None
+        # Dispatch a unified worker job when intersect or stretch needs updating.
+        needs_classify = props.show_intersect and not props.is_muted and (
+            any_changed or (_intersect_batches['hatch'] is None and _result_timer_fn is None))
+        needs_stretch = props.show_stretch and not props.is_muted and (
+            any_changed or stretch._geo_batch is None)
+
+        if needs_classify or needs_stretch:
+            if not _dispatch_worker_job(props):
+                # Worker unavailable — fall back to synchronous paths
+                if needs_classify:
+                    _rebuild_intersect_batches(props)
+                if needs_stretch:
+                    stretch.rebuild(props, _obj_cache, context)
+            else:
+                _start_result_poller()
+
+        # Clear disabled overlays
+        if not (props.show_intersect and not props.is_muted):
+            _intersect_batches['hatch']   = None
             _intersect_batches['checker'] = None
+        if not (props.show_stretch and not props.is_muted):
+            stretch.clear()
 
         if props.show_padding and not props.is_muted:
             if any_changed or padding.batches['ok'] is None:
                 _rebuild_padding_batches(props)
         else:
             padding.clear()
-
-        if props.show_stretch and not props.is_muted:
-            if any_changed or stretch._geo_batch is None:
-                stretch.rebuild(props, _obj_cache, context)
-        else:
-            stretch.clear()
 
     except Exception as e:
         utils.log("update", f"error: {e}")
@@ -1163,6 +1223,13 @@ def depsgraph_update_handler(scene, depsgraph):
     force_rebuild = False
     if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch):
         force_rebuild = True
+
+    # Detect objects added to multi-object edit that aren't in our cache yet.
+    if not force_rebuild:
+        for obj in bpy.context.scene.objects:
+            if obj.type == 'MESH' and obj.mode == 'EDIT' and obj.name not in _obj_cache:
+                force_rebuild = True
+                break
 
     if not force_rebuild and not any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
                                      for u in depsgraph.updates):
@@ -1279,7 +1346,7 @@ def unregister():
         bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_handler)
 
     _cancel_debounce()
-    _cancel_classify_timer()
+    _cancel_result_poller()
 
     offscreen.free()
     padding.clear()

@@ -371,6 +371,23 @@ def draw(batch, opacity, context, use_tint=False):
             _draw_error_printed = True
 
 
+def build_batch_from_precomputed(coords, warped_uvs, colors):
+    """Build GPU batch from pre-computed worker data (no math, just batch_for_shader)."""
+    shader = _get_shader()
+    if shader is None or not coords:
+        return None
+    try:
+        return batch_for_shader(shader, 'TRIS', {
+            "pos": coords,
+            "warpedUV": warped_uvs,
+            "color": colors,
+        })
+    except Exception as e:
+        print(f"[UVO] stretch_checker batch_from_precomputed error: {e}")
+        traceback.print_exc()
+        return None
+
+
 def clear():
     """Release the cached shader on unregister."""
     global _shader

@@ -40,6 +40,27 @@ def rebuild(props, obj_cache, context):
     _heatmap_batch = stretch_heatmap.build_geometry_batch(obj_cache, props)
 
 
+def rebuild_from_worker_data(results):
+    """Rebuild geometry batches from pre-computed worker data.
+
+    *results* is a dict {obj_name: {coords, warped_uvs, checker_colors, heatmap_colors}}.
+    """
+    global _geo_batch, _heatmap_batch
+
+    all_coords  = []
+    all_warped  = []
+    all_checker = []
+    all_heatmap = []
+
+    for data in results.values():
+        all_coords.extend(data['coords'])
+        all_warped.extend(data['warped_uvs'])
+        all_checker.extend(data['checker_colors'])
+        all_heatmap.extend(data['heatmap_colors'])
+
+    _geo_batch     = stretch_checker.build_batch_from_precomputed(all_coords, all_warped, all_checker)
+    _heatmap_batch = stretch_heatmap.build_batch_from_precomputed(all_coords, all_heatmap)
+
 def draw(props, shader, context):
     """Draw stretch overlay layers.
 
