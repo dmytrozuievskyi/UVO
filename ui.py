@@ -149,17 +149,25 @@ def draw_header_button(self, context):
     btn.active = native_on
 
     if pcoll:
-        icon_id = (pcoll["uv_overlay_on"].icon_id if is_active
-                   else pcoll["uv_overlay_off"].icon_id)
+        if is_active:
+            from . import draw as _draw
+            if _draw.is_worker_busy():
+                frame = _draw.get_busy_frame() % 12
+                icon_id = pcoll[f"clock_frame_{frame:02d}"].icon_id
+            else:
+                icon_id = pcoll["uv_overlay_on"].icon_id
+        else:
+            icon_id = pcoll["uv_overlay_off"].icon_id
+
         btn.operator(
-            "uv.toggle_id_overlay",
+            "uv.toggle_overlay",
             text       = "",
             icon_value = icon_id,
             depress    = is_active,
         )
     else:
         btn.operator(
-            "uv.toggle_id_overlay",
+            "uv.toggle_overlay",
             text    = "",
             icon    = 'GROUP_UVS',
             depress = is_active,

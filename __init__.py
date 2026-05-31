@@ -16,7 +16,6 @@ _worker_lock     = threading.Lock()
 _next_job_id     = 0
 _result_queue    = None   # Queue created fresh on each start_worker() — clears stale results
 _reader_thread   = None   # background thread reading worker stdout
-_classify_generation = 0              # incremented each time a new classify job is sent
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
 
 
@@ -86,16 +85,6 @@ def read_result_blocking(timeout=5.0):
 def get_result_queue():
     """Return the queue where worker results arrive. None if worker not started."""
     return _result_queue
-
-
-def get_classify_generation():
-    return _classify_generation
-
-
-def next_classify_generation():
-    global _classify_generation
-    _classify_generation += 1
-    return _classify_generation
 
 
 def _start_reader_thread():
@@ -274,9 +263,16 @@ def register():
         icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         pcoll.load("uv_overlay_on",  os.path.join(icons_dir, "uv_overlay_on.png"),  'IMAGE')
         pcoll.load("uv_overlay_off", os.path.join(icons_dir, "uv_overlay_off.png"), 'IMAGE')
+        for i in range(12):
+            name = f"clock_frame_{i:02d}"
+            pcoll.load(name, os.path.join(icons_dir, f"{name}.png"), 'IMAGE')
+        
         # Force immediate decode — prevents the lazy-load spinner on first toggle.
         _ = pcoll["uv_overlay_on"].icon_id
         _ = pcoll["uv_overlay_off"].icon_id
+        for i in range(12):
+            _ = pcoll[f"clock_frame_{i:02d}"].icon_id
+            
         preview_collections["main"] = pcoll
     except Exception as e:
         print(f"[UVO] Warning: custom icons unavailable ({e}) — using fallback icon")

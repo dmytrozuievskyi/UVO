@@ -39,6 +39,8 @@ _shader = None
 _classify_job_id   = 0     # id of the most recently dispatched classify job
 _stretch_job_id    = 0     # id of the most recently dispatched stretch job
 _result_timer_fn   = None  # unified bpy timer for polling worker results
+_busy_frame        = 0     # incremented by poller while jobs are in-flight
+
 
 # Sentinel: pre-pass failed for this object — use n=1 fallback, keeping
 # palette offsets consistent with what the pre-pass recorded.
@@ -389,7 +391,7 @@ def _start_result_poller():
         return  # already running
 
     def _poll():
-        global _result_timer_fn, _classify_job_id, _stretch_job_id
+        global _result_timer_fn, _classify_job_id, _stretch_job_id, _busy_frame
         import sys as _sys
         pkg = _sys.modules.get(__package__)
         if pkg is None:
@@ -437,10 +439,13 @@ def _start_result_poller():
             if _classify_job_id == 0 and _stretch_job_id == 0:
                 _result_timer_fn = None
                 return None
+            _busy_frame += 1
+            _tag_redraw()
             return 0.05
 
         # Processed at least one result — stop if no more pending jobs
         if _classify_job_id != 0 or _stretch_job_id != 0:
+            _busy_frame += 1
             return 0.05
 
         _result_timer_fn = None
@@ -460,6 +465,13 @@ def _cancel_result_poller():
         _result_timer_fn = None
     _classify_job_id = 0
     _stretch_job_id = 0
+
+
+def is_worker_busy():
+    return _classify_job_id != 0 or _stretch_job_id != 0
+
+def get_busy_frame():
+    return _busy_frame
 
 
 def _tag_redraw():

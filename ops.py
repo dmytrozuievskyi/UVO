@@ -3,9 +3,9 @@ import math
 
 
 class UV_OT_ToggleOverlay(bpy.types.Operator):
-    """Toggle mute on all UV ID overlays"""
-    bl_idname = "uv.toggle_id_overlay"
-    bl_label  = "UV ID Overlays"
+    """Toggle mute on all UV overlays"""
+    bl_idname = "uv.toggle_overlay"
+    bl_label  = "UV Overlays"
 
     def execute(self, context):
         props = context.scene.uv_id_props
