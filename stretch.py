@@ -1,3 +1,6 @@
+from . import stretch_checker
+from . import stretch_heatmap
+
 def compute_vertex_jacobians(isle):
     """Area-weighted average of Jacobians per UV vertex."""
     vert_M_sum = {}
@@ -23,9 +26,6 @@ def compute_vertex_jacobians(isle):
             vert_area_sum[key] += area
             
     return vert_M_sum, vert_area_sum
-
-from . import stretch_checker
-from . import stretch_heatmap
 
 
 _geo_batch = None

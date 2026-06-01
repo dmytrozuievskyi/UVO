@@ -124,7 +124,7 @@ def build_geometry_batch(obj_cache, props):
             
         tex_w = cache.get('tex_w', 1024.0)
         tex_h = cache.get('tex_h', 1024.0)
-        target_texel = cache.get('target_texel', 500.0)
+        target_texel = cache.get('target_texel', 0.0)
         
         for isle in islands:
             if target_texel > 0:

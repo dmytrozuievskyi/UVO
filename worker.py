@@ -24,9 +24,8 @@ import traceback
 ipc_out = sys.stdout.buffer
 sys.stdout = sys.stderr
 
-# Worker-side timeout. Slightly less than the draw.py watchdog (8 s) so the
-# worker can write an informative error before being killed externally.
-JOB_TIMEOUT_SECS = 6.5
+# Worker-side timeout.
+JOB_TIMEOUT_SECS = 10.0
 
 _LOG_PATH = None
 _log_lock = threading.Lock()
