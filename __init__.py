@@ -269,9 +269,13 @@ def register():
         
         # Force immediate decode — prevents the lazy-load spinner on first toggle.
         _ = pcoll["uv_overlay_on"].icon_id
+        _ = pcoll["uv_overlay_on"].image_size
         _ = pcoll["uv_overlay_off"].icon_id
+        _ = pcoll["uv_overlay_off"].image_size
         for i in range(12):
-            _ = pcoll[f"clock_frame_{i:02d}"].icon_id
+            icon = pcoll[f"clock_frame_{i:02d}"]
+            _ = icon.icon_id
+            _ = icon.image_size
             
         preview_collections["main"] = pcoll
     except Exception as e:

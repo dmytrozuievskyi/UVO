@@ -40,6 +40,7 @@ _classify_job_id   = 0     # id of the most recently dispatched classify job
 _stretch_job_id    = 0     # id of the most recently dispatched stretch job
 _result_timer_fn   = None  # unified bpy timer for polling worker results
 _busy_frame        = 0     # incremented by poller while jobs are in-flight
+_job_start_times   = {}    # {job_id: float_time} for round-trip tracking
 
 
 # Sentinel: pre-pass failed for this object — use n=1 fallback, keeping
@@ -379,6 +380,10 @@ def _dispatch_worker_job(props):
         'do_classify': do_classify,
         'do_stretch':  do_stretch,
     })
+    
+    import time
+    _job_start_times[job_id] = time.time()
+    
     utils.log("async", f"worker job dispatched id={job_id} ok={ok} "
               f"classify={do_classify} stretch={do_stretch}")
     return ok
@@ -493,6 +498,12 @@ def _apply_worker_result(result):
     Called from the polling timer, always on the main thread.
     """
     job_id = result.get('id')
+    
+    import time
+    start_time = _job_start_times.pop(job_id, None)
+    if start_time is not None:
+        duration = (time.time() - start_time) * 1000.0
+        utils.log("timing", f"async job {job_id} round-trip={duration:.1f}ms")
 
     # ── Apply classify portion ───────────────────────────────────────────
     if 'self_results' in result:
