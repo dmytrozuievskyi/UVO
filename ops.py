@@ -47,7 +47,7 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         obj_props = context.active_object.uv_id_props
 
         try:
-            density_px_per_m = self._sample(context, obj_props)
+            density_px_per_m = self._sample(context)
         except Exception as exc:
             self.report({'WARNING'}, f"Sample failed: {exc}")
             return {'CANCELLED'}
@@ -71,82 +71,118 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
         return {'FINISHED'}
 
 
-    def _sample(self, context, props):
+    def _sample(self, context):
         """
-        Calculate texel density (px/m) for the selected UV islands.
+        Calculate texel density (px/m) for the selected UV islands across all edit objects.
 
         Formula:
             density [px/m] = sqrt( (tex_w * tex_h) * (uv_area / surface_area_3d) )
 
-        - tex_w / tex_h  : texture dimensions from the global Texture Setup section
+        - tex_w / tex_h  : texture dimensions from the object's Texture Setup section
         - uv_area        : sum of triangle areas in UV [0,1] space
         - surface_area_3d: sum of triangle areas in 3D object space (metres)
 
-        The maximum density across all selected islands is taken as the target.
+        The maximum density across all sampled islands across all objects is returned.
         """
         import bmesh
 
-        obj = context.active_object
-        if obj is None or obj.type != 'MESH':
-            raise RuntimeError("No active mesh object")
+        edit_objs = [o for o in context.scene.objects if o.type == 'MESH' and o.mode == 'EDIT']
+        if not edit_objs:
+            raise RuntimeError("No edit mesh objects found")
+            
+        sync_on = context.scene.tool_settings.use_uv_select_sync
+        
+        has_any_selection = False
+        obj_data = {} # {obj: (bm, uv_layer, sel_faces)}
+        
+        # Pass 1: Find selections respecting UV Sync
+        for obj in edit_objs:
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.faces.ensure_lookup_table()
+            uv_layer = bm.loops.layers.uv.verify()
+            
+            if sync_on:
+                sel_faces = [f for f in bm.faces if f.select]
+            else:
+                sel_faces = []
+                for f in bm.faces:
+                    face_selected = False
+                    for l in f.loops:
+                        if hasattr(l, "uv_select_vert"):
+                            if getattr(l, "uv_select_vert"):
+                                face_selected = True
+                                break
+                        else:
+                            if getattr(l[uv_layer], "select", False):
+                                face_selected = True
+                                break
+                    if face_selected:
+                        sel_faces.append(f)
+                
+            if sel_faces:
+                has_any_selection = True
+                
+            obj_data[obj] = (bm, uv_layer, sel_faces)
+            
+        # Pass 2: Fallback if nothing selected anywhere
+        if not has_any_selection:
+            for obj in edit_objs:
+                bm, uv_layer, _ = obj_data[obj]
+                obj_data[obj] = (bm, uv_layer, list(bm.faces))
 
-        tex_w = int(props.tex_res_x)
-        tex_h = int(props.tex_res_y)
+        max_density = 0.0
+        found_any = False
 
-        bm = bmesh.from_edit_mesh(obj.data)
-        bm.faces.ensure_lookup_table()
+        for obj in edit_objs:
+            bm, uv_layer, sel_faces = obj_data[obj]
+            if not sel_faces:
+                continue
+                
+            props = obj.uv_id_props if hasattr(obj, 'uv_id_props') else context.active_object.uv_id_props
+            tex_w = int(props.tex_res_x)
+            tex_h = int(props.tex_res_y)
 
-        uv_layer = bm.loops.layers.uv.verify()
+            islands = _find_uv_islands(sel_faces, uv_layer)
 
-        # Collect selected faces
-        selected_faces = [f for f in bm.faces if f.select]
-        if not selected_faces:
-            raise RuntimeError("No faces selected")
+            for island_faces in islands:
+                uv_area   = 0.0
+                surf_area = 0.0
 
-        # Island grouping (connected selected faces)
-        islands = _find_uv_islands(selected_faces, uv_layer)
+                for face in island_faces:
+                    loops = face.loops
+                    # Fan-triangulate the face
+                    l0 = loops[0]
+                    uv0  = l0[uv_layer].uv
+                    p0   = obj.matrix_world @ l0.vert.co
 
-        densities = []
-        for island_faces in islands:
-            uv_area   = 0.0
-            surf_area = 0.0
+                    for i in range(1, len(loops) - 1):
+                        l1 = loops[i]
+                        l2 = loops[i + 1]
 
-            for face in island_faces:
-                loops = face.loops
-                # Fan-triangulate the face
-                l0 = loops[0]
-                uv0  = l0[uv_layer].uv
-                p0   = obj.matrix_world @ l0.vert.co
+                        uv1 = l1[uv_layer].uv
+                        uv2 = l2[uv_layer].uv
+                        p1  = obj.matrix_world @ l1.vert.co
+                        p2  = obj.matrix_world @ l2.vert.co
 
-                for i in range(1, len(loops) - 1):
-                    l1 = loops[i]
-                    l2 = loops[i + 1]
+                        # UV triangle area (cross product z-component, ×0.5)
+                        eu = uv1 - uv0
+                        ev = uv2 - uv0
+                        uv_area += abs(eu.x * ev.y - eu.y * ev.x) * 0.5
 
-                    uv1 = l1[uv_layer].uv
-                    uv2 = l2[uv_layer].uv
-                    p1  = obj.matrix_world @ l1.vert.co
-                    p2  = obj.matrix_world @ l2.vert.co
+                        # 3D triangle area
+                        e1 = p1 - p0
+                        e2 = p2 - p0
+                        surf_area += e1.cross(e2).length * 0.5
 
-                    # UV triangle area (cross product z-component, ×0.5)
-                    eu = uv1 - uv0
-                    ev = uv2 - uv0
-                    uv_area += abs(eu.x * ev.y - eu.y * ev.x) * 0.5
+                if surf_area > 1e-12 and uv_area > 1e-12:
+                    density = math.sqrt((tex_w * tex_h) * (uv_area / surf_area))
+                    max_density = max(max_density, density)
+                    found_any = True
 
-                    # 3D triangle area
-                    e1 = p1 - p0
-                    e2 = p2 - p0
-                    surf_area += e1.cross(e2).length * 0.5
+        if not found_any:
+            raise RuntimeError("All sampled islands have zero area")
 
-            if surf_area < 1e-12 or uv_area < 1e-12:
-                continue  # zero-area island — skip
-
-            density = math.sqrt((tex_w * tex_h) * (uv_area / surf_area))
-            densities.append(density)
-
-        if not densities:
-            raise RuntimeError("All selected islands have zero area")
-
-        return max(densities)  # take maximum across selection
+        return max_density
 
 
 
