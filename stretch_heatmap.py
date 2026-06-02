@@ -47,15 +47,6 @@ def clear():
     _shader = None
 
 
-def _lerp_color(c1, c2, t):
-    return (
-        c1[0] + (c2[0] - c1[0]) * t,
-        c1[1] + (c2[1] - c1[1]) * t,
-        c1[2] + (c2[2] - c1[2]) * t,
-        c1[3] + (c2[3] - c1[3]) * t
-    )
-
-
 def build_geometry_batch(obj_cache, props):
     try:
         shader = _get_shader()
@@ -67,9 +58,6 @@ def build_geometry_batch(obj_cache, props):
         colors = []
 
 
-        col_blue = (0.0, 0.0, 1.0, 1.0)
-        col_gray = (0.214, 0.214, 0.214, 0.0)
-        col_red  = (1.0, 0.0, 0.0, 1.0)
 
         for cache in obj_cache.values():
             islands = cache.get('islands')
@@ -81,17 +69,9 @@ def build_geometry_batch(obj_cache, props):
             target_texel = cache.get('target_texel', 0.0)
 
             for isle in islands:
-                if target_texel > 0:
-                    scale_u = target_texel / tex_w
-                    scale_v = target_texel / tex_h
-                else:
-                    scale = math.sqrt(isle.uv_area / isle.surface_area) if isle.surface_area > 0 else 1.0
-                    aspect = tex_h / tex_w if tex_w > 0 else 1.0
-                    scale_u = scale * math.sqrt(aspect)
-                    scale_v = scale / math.sqrt(aspect)
+                scale, scale_u, scale_v = stretch.compute_scale_factors(isle, tex_w, tex_h, target_texel)
 
                 vert_M_sum, vert_area_sum = stretch.compute_vertex_jacobians(isle)
-
 
                 heat_colors = {}
                 for key, area in vert_area_sum.items():
@@ -100,51 +80,15 @@ def build_geometry_batch(obj_cache, props):
                     else:
                         M_avg = [1.0, 0.0, 0.0, 1.0]
 
-                    M00 = M_avg[0] * scale_u
-                    M01 = M_avg[1] * scale_v
-                    M10 = M_avg[2] * scale_u
-                    M11 = M_avg[3] * scale_v
-
-
-                    det_M = M00 * M11 - M01 * M10
-                    area_stretch = math.sqrt(abs(det_M)) if det_M != 0 else 1.0
-
-
-                    E = (M00 + M11) * 0.5
-                    F = (M00 - M11) * 0.5
-                    G = (M10 + M01) * 0.5
-                    H = (M10 - M01) * 0.5
-                    Q = math.sqrt(E*E + H*H)
-                    R = math.sqrt(F*F + G*G)
-                    s1 = Q + R
-                    s2 = abs(Q - R)
-
-                    if abs(s1) < 1e-8 or abs(s2) < 1e-8:
-                        angle_stretch = 1.0
-                    else:
-                        angle_stretch = (abs(s1/s2) + abs(s2/s1)) * 0.5
-
-                    area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
-                    angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
-
-
-                    weight = 0.5
-                    sign = 1.0 if area_err >= 0 else -1.0
-                    total_err = sign * (abs(area_err) * (1.0 - weight) + angle_err * weight)
-
-                    val = max(-1.0, min(1.0, total_err))
-
-                    if val <= 0:
-                        heat_colors[key] = _lerp_color(col_gray, col_blue, -val)
-                    else:
-                        heat_colors[key] = _lerp_color(col_gray, col_red, val)
+                    area_err, angle_err = stretch.compute_stretch_metrics(M_avg, scale_u, scale_v)
+                    heat_colors[key] = stretch.error_to_color(area_err, angle_err, 'heatmap')
 
 
                 for tri in isle.tris:
                     for u, v in tri:
                         key = (round(u, 5), round(v, 5))
                         coords.append((u, v, 0.0))
-                        colors.append(heat_colors.get(key, col_gray))
+                        colors.append(heat_colors.get(key, stretch.COL_GRAY))
 
         if not coords:
             return None

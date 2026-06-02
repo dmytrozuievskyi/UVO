@@ -704,70 +704,38 @@ def _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
     offscreen.mark_dirty()
 
 
-def _rebuild_intersect_batches(props):
-    """Classify islands and rebuild hatch/checker batches (synchronous fallback)."""
-    global _inter_island_tris
-
-    _t0 = time.perf_counter()
-
+def _sync_classify(props):
+    """Run classify synchronously, then rebuild batches from cache (fallback)."""
     utils.log("async", "sync classify fallback")
-
-    # Synchronous fallback
-    shader   = _get_shader()
-    opacity  = props.intersect_opacity
-    tiled    = (props.intersect_uv_mode == 'TILED')
-
-    all_islands_flat = [
-        isle
-        for cache in _obj_cache.values()
-        if cache.get('islands')
-        for isle in cache['islands']
-    ]
-
-    global_inter       = set()
-    global_stack       = set()
-    global_inter_pairs = set()   # (flat_fi_a, flat_fi_b) for offscreen tile logic
-
+    tiled = (props.intersect_uv_mode == 'TILED')
+    
     obj_names    = list(_obj_cache.keys())
     n_objs       = len(obj_names)
-    base_indices = {}
-    idx = 0
-    for name, cache in _obj_cache.items():
-        base_indices[name] = idx
-        idx += len(cache.get('islands') or [])
 
     for name in obj_names:
         cache    = _obj_cache[name]
         islands  = cache.get('islands') or []
         cur_hash = cache.get('hash')
         prev     = _isect_self_cache.get(name)
-        if prev and prev['uv_hash'] == cur_hash:
-            entry = prev
-        else:
-            p           = prev or {}
-            det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
-            inter_idx, stack_idx, uv_kh, i_pairs, island_keys, pair_cache = ix.classify_islands(
-                det_islands,
-                prev_inter_idx    = p.get('inter_idx'),
-                prev_stack_idx    = p.get('stack_idx'),
-                prev_uv_key_hash  = p.get('uv_key_hash'),
-                prev_inter_pairs  = p.get('inter_pairs'),
-                prev_island_keys  = p.get('island_keys'),
-                prev_pair_cache   = p.get('pair_cache'),
-            )
-            entry = {'uv_hash': cur_hash, 'inter_idx': inter_idx,
-                     'stack_idx': stack_idx,
-                     'uv_key_hash': uv_kh, 'inter_pairs': i_pairs,
-                     'island_keys': island_keys, 'pair_cache': pair_cache}
-            _isect_self_cache[name] = entry
-        base = base_indices[name]
-        for li in entry['inter_idx']:
-            global_inter.add(base + li)
-        for li in entry['stack_idx']:
-            global_stack.add(base + li)
-        for la, lb in entry.get('inter_pairs') or ():
-            fa, fb = base + la, base + lb
-            global_inter_pairs.add((fa, fb) if fa < fb else (fb, fa))
+        if prev and prev.get('uv_hash') == cur_hash:
+            continue
+            
+        p           = prev or {}
+        det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
+        inter_idx, stack_idx, uv_kh, i_pairs, island_keys, pair_cache = ix.classify_islands(
+            det_islands,
+            prev_inter_idx    = p.get('inter_idx'),
+            prev_stack_idx    = p.get('stack_idx'),
+            prev_uv_key_hash  = p.get('uv_key_hash'),
+            prev_inter_pairs  = p.get('inter_pairs'),
+            prev_island_keys  = p.get('island_keys'),
+            prev_pair_cache   = p.get('pair_cache'),
+        )
+        _isect_self_cache[name] = {
+            'uv_hash': cur_hash, 'inter_idx': inter_idx, 'stack_idx': stack_idx,
+            'uv_key_hash': uv_kh, 'inter_pairs': i_pairs,
+            'island_keys': island_keys, 'pair_cache': pair_cache
+        }
 
     active_pairs = set()
     for i in range(n_objs):
@@ -781,45 +749,31 @@ def _rebuild_intersect_batches(props):
             ha, hb = ca.get('hash'), cb.get('hash')
 
             prev = _isect_cross_cache.get(pair_key)
-            if prev and prev['ha'] == ha and prev['hb'] == hb:
-                entry = prev
-            else:
-                p      = prev or {}
-                det_ia = [ix.normalize_island(i) for i in ia] if tiled else ia
-                det_ib = [ix.normalize_island(i) for i in ib] if tiled else ib
-                r_a, r_b, s_a, s_b, uv_h, i_pairs, keys_a, keys_b, pair_cache = ix.classify_islands_cross(
-                    det_ia, det_ib,
-                    prev_inter_a       = p.get('inter_a'),
-                    prev_inter_b       = p.get('inter_b'),
-                    prev_stack_a       = p.get('stack_a'),
-                    prev_stack_b       = p.get('stack_b'),
-                    prev_uv_hash       = p.get('uv_hash'),
-                    prev_inter_pairs   = p.get('inter_pairs'),
-                    prev_island_keys_a = p.get('island_keys_a'),
-                    prev_island_keys_b = p.get('island_keys_b'),
-                    prev_pair_cache    = p.get('pair_cache'),
-                )
-                entry = {'ha': ha, 'hb': hb,
-                         'inter_a': r_a, 'inter_b': r_b,
-                         'stack_a': s_a, 'stack_b': s_b,
-                         'uv_hash': uv_h, 'inter_pairs': i_pairs,
-                         'island_keys_a': keys_a, 'island_keys_b': keys_b,
-                         'pair_cache': pair_cache}
-                _isect_cross_cache[pair_key] = entry
-
-            base_a = base_indices[na]
-            base_b = base_indices[nb]
-            for li in entry['inter_a']:
-                global_inter.add(base_a + li)
-            for li in entry['inter_b']:
-                global_inter.add(base_b + li)
-            for li in entry.get('stack_a', ()):
-                global_stack.add(base_a + li)
-            for li in entry.get('stack_b', ()):
-                global_stack.add(base_b + li)
-            for la, lb in entry.get('inter_pairs') or ():
-                fa, fb = base_a + la, base_b + lb
-                global_inter_pairs.add((fa, fb) if fa < fb else (fb, fa))
+            if prev and prev.get('ha') == ha and prev.get('hb') == hb:
+                continue
+                
+            p      = prev or {}
+            det_ia = [ix.normalize_island(i) for i in ia] if tiled else ia
+            det_ib = [ix.normalize_island(i) for i in ib] if tiled else ib
+            r_a, r_b, s_a, s_b, uv_h, i_pairs, keys_a, keys_b, pair_cache = ix.classify_islands_cross(
+                det_ia, det_ib,
+                prev_inter_a       = p.get('inter_a'),
+                prev_inter_b       = p.get('inter_b'),
+                prev_stack_a       = p.get('stack_a'),
+                prev_stack_b       = p.get('stack_b'),
+                prev_uv_hash       = p.get('uv_hash'),
+                prev_inter_pairs   = p.get('inter_pairs'),
+                prev_island_keys_a = p.get('island_keys_a'),
+                prev_island_keys_b = p.get('island_keys_b'),
+                prev_pair_cache    = p.get('pair_cache'),
+            )
+            _isect_cross_cache[pair_key] = {
+                'ha': ha, 'hb': hb,
+                'inter_a': r_a, 'inter_b': r_b, 'stack_a': s_a, 'stack_b': s_b,
+                'uv_hash': uv_h, 'inter_pairs': i_pairs,
+                'island_keys_a': keys_a, 'island_keys_b': keys_b,
+                'pair_cache': pair_cache
+            }
 
     for name in list(_isect_self_cache):
         if name not in _obj_cache:
@@ -828,133 +782,7 @@ def _rebuild_intersect_batches(props):
         if pk not in active_pairs:
             del _isect_cross_cache[pk]
 
-    # Tile-crossing islands → flag as errors.
-    tile_crossing_flat = set()
-    if tiled:
-        for name, cache in _obj_cache.items():
-            islands = cache.get('islands') or []
-            base    = base_indices[name]
-            for li in ix.find_tile_crossing_islands(islands):
-                fi = base + li
-                global_inter.add(fi)
-                tile_crossing_flat.add(fi)
-        utils.log("rebuild", f"tile_crossing={len(tile_crossing_flat)}")
-
-    hatch_coords, hatch_colors     = [], []
-    checker_coords, checker_colors = [], []
-    checker_col = (1.0, 1.0, 1.0, opacity)
-
-    _hits = 0
-    _miss = 0
-
-
-    live_keys = {isle.uv_key for isle in all_islands_flat if isle.uv_key is not None}
-
-    for fi, isle in enumerate(all_islands_flat):
-        key = isle.uv_key
-
-        if fi in global_inter:
-            r, g, b, _ = isle.color
-            hc = (r, g, b, opacity)
-            if key is not None and key in _hatch_seg_cache:
-                segs = _hatch_seg_cache[key]
-                _hits += 1
-            else:
-                segs = ix.generate_hatch(isle.tris)
-                if key is not None:
-                    _hatch_seg_cache[key] = segs
-                _miss += 1
-            for p1, p2 in segs:
-                hatch_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
-                hatch_colors.extend((hc, hc))
-
-        if fi in global_stack:
-            if key is not None and key in _cross_hatch_seg_cache:
-                cross_segs = _cross_hatch_seg_cache[key]
-                _hits += 1
-            else:
-                cross_segs = ix.generate_cross_hatch(isle.tris)
-                if key is not None:
-                    _cross_hatch_seg_cache[key] = cross_segs
-                _miss += 1
-            for p1, p2 in cross_segs:
-                checker_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
-                checker_colors.extend((checker_col, checker_col))
-
-
-    for dead in [k for k in _hatch_seg_cache       if k not in live_keys]:
-        del _hatch_seg_cache[dead]
-    for dead in [k for k in _cross_hatch_seg_cache if k not in live_keys]:
-        del _cross_hatch_seg_cache[dead]
-
-    def _make(prim, coords, colors):
-        if not coords:
-            return None
-        return batch_for_shader(shader, prim, {"pos": coords, "color": colors})
-
-    _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
-    _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
-
-
-
-
-
-    seen_norm_keys = set()
-    inter_tris_raw = []
-    n_unique       = 0   # unique contributors (tile-crossing counts as 1 each)
-
-    if tiled:
-        for fi in tile_crossing_flat:
-            isle = all_islands_flat[fi]
-            mn_u, mn_v, mx_u, mx_v = isle.aabb
-            touches_tile0 = (mn_u < 1.0 - ix.UV_EPS and mx_u > ix.UV_EPS and
-                             mn_v < 1.0 - ix.UV_EPS and mx_v > ix.UV_EPS)
-            if touches_tile0:
-
-                inter_tris_raw.append(isle.tris)
-                inter_tris_raw.append(isle.tris)
-                n_unique += 1
-
-        for fi_a, fi_b in global_inter_pairs:
-            if fi_a in tile_crossing_flat or fi_b in tile_crossing_flat:
-                continue
-            isle_a = all_islands_flat[fi_a]
-            isle_b = all_islands_flat[fi_b]
-            if not _island_in_tile0(isle_a) and not _island_in_tile0(isle_b):
-                continue
-            norm_a = ix.normalize_island(isle_a)
-            norm_b = ix.normalize_island(isle_b)
-            for norm in (norm_a, norm_b):
-                key = norm.uv_key
-                if key is not None:
-                    if key in seen_norm_keys:
-                        continue
-                    seen_norm_keys.add(key)
-                inter_tris_raw.append(norm.tris)
-                n_unique += 1
-    else:
-        for fi, isle in enumerate(all_islands_flat):
-            if fi not in global_inter:
-                continue
-            key = isle.uv_key
-            if key is not None:
-                if key in seen_norm_keys:
-                    continue
-                seen_norm_keys.add(key)
-            inter_tris_raw.append(isle.tris)
-            n_unique += 1
-
-    global _inter_gray, _inter_threshold
-    _inter_gray      = 1.0 / (n_unique + 1) if n_unique > 0 else 0.5
-    _inter_threshold = _inter_gray * 1.5
-
-    _inter_island_tris = [tri for tris in inter_tris_raw for tri in tris]
-    offscreen.mark_dirty()
-    utils.log("rebuild", f"inter_tris={len(_inter_island_tris)}, "
-          f"hatch_segs={len(hatch_coords)//2}, stack={len(global_stack)}")
-    utils.log("timing", f"intersect_rebuild={1000*(time.perf_counter()-_t0):.1f}ms  "
-          f"hatch_segs={len(hatch_coords)//2}  offscreen_tris={len(_inter_island_tris)}  "
-          f"cache hits={_hits} miss={_miss}")
+    _rebuild_hatch_from_cache(props)
 
 
 def _rebuild_id_opacity(props):
@@ -1152,7 +980,7 @@ def update_batches_safe(context):
             elif not _dispatch_worker_job(props):
                 # Sync fallback
                 if needs_classify:
-                    _rebuild_intersect_batches(props)
+                    _sync_classify(props)
                 if needs_stretch:
                     stretch.rebuild(props, _obj_cache, context)
             else:

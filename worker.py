@@ -307,218 +307,34 @@ def _process_job(job, ix):
     return {'id': job.get('id'), 'type': 'error', 'msg': f'unknown: {job_type!r}'}
 
 
-_STRETCH_COL_BLUE = (0.0, 0.0, 1.0, 1.0)
-_STRETCH_COL_GRAY = (0.214, 0.214, 0.214, 0.0)
-_STRETCH_COL_RED  = (1.0, 0.0, 0.0, 1.0)
 
 
-def _compute_vertex_jacobians(isle):
-    """Area-weighted average of Jacobians per UV vertex."""
-    vert_M_sum = {}
-    vert_area_sum = {}
-    for i, tri in enumerate(isle.tris):
-        M = isle.jacobians[i]
-        u0, v0 = tri[0]
-        u1, v1 = tri[1]
-        u2, v2 = tri[2]
-        area = abs((u1 - u0) * (v2 - v0) - (v1 - v0) * (u2 - u0)) * 0.5
-        for u, v in tri:
-            key = (round(u, 5), round(v, 5))
-            if key not in vert_M_sum:
-                vert_M_sum[key] = [0.0, 0.0, 0.0, 0.0]
-                vert_area_sum[key] = 0.0
-            vert_M_sum[key][0] += M[0] * area
-            vert_M_sum[key][1] += M[1] * area
-            vert_M_sum[key][2] += M[2] * area
-            vert_M_sum[key][3] += M[3] * area
-            vert_area_sum[key] += area
-    return vert_M_sum, vert_area_sum
 
+def _stretch_compute_island(isle, tex_w, tex_h, target_texel):
+    """Compute stretch data for a single island. Returns (coords, warped_uvs, heat_colors_checker, heat_colors_heatmap)."""
+    scale, scale_u, scale_v = stretch.compute_scale_factors(isle, tex_w, tex_h, target_texel)
 
-def _compute_heat_colors(vert_M_sum, vert_area_sum, scale_u, scale_v, mode):
-    """Compute per-vertex heat color from Jacobian data.
+    vert_M_sum, vert_area_sum = stretch.compute_vertex_jacobians(isle)
 
-    mode='checker' uses the additive formula with boosted magnitude.
-    mode='heatmap' uses the weighted formula.
-    """
-    col_blue = _STRETCH_COL_BLUE
-    col_gray = _STRETCH_COL_GRAY
-    col_red  = _STRETCH_COL_RED
-    heat_colors = {}
-
+    checker_colors = {}
+    heatmap_colors = {}
     for key, area in vert_area_sum.items():
         if area > 1e-8:
             M_avg = [m / area for m in vert_M_sum[key]]
         else:
             M_avg = [1.0, 0.0, 0.0, 1.0]
+        
+        area_err, angle_err = stretch.compute_stretch_metrics(M_avg, scale_u, scale_v)
+        checker_colors[key] = stretch.error_to_color(area_err, angle_err, 'checker')
+        heatmap_colors[key] = stretch.error_to_color(area_err, angle_err, 'heatmap')
 
-        M00 = M_avg[0] * scale_u
-        M01 = M_avg[1] * scale_v
-        M10 = M_avg[2] * scale_u
-        M11 = M_avg[3] * scale_v
-
-        det_M = M00 * M11 - M01 * M10
-        area_stretch = math.sqrt(abs(det_M)) if det_M != 0 else 1.0
-
-        E = (M00 + M11) * 0.5
-        F = (M00 - M11) * 0.5
-        G = (M10 + M01) * 0.5
-        H = (M10 - M01) * 0.5
-        Q = math.sqrt(E*E + H*H)
-        R = math.sqrt(F*F + G*G)
-        s1 = Q + R
-        s2 = abs(Q - R)
-
-        if abs(s1) < 1e-8 or abs(s2) < 1e-8:
-            angle_stretch = 1.0
-        else:
-            angle_stretch = (abs(s1/s2) + abs(s2/s1)) * 0.5
-
-        area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
-        angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
-
-        sign = 1.0 if area_err >= 0 else -1.0
-
-        if mode == 'checker':
-            total_err = area_err + sign * angle_err
-            val = max(-1.0, min(1.0, total_err * 0.7))
-            mag = abs(val)
-            boosted_mag = (mag + math.sqrt(mag)) * 0.5
-            val = boosted_mag if val >= 0 else -boosted_mag
-        else:
-            weight = 0.5
-            total_err = sign * (abs(area_err) * (1.0 - weight) + angle_err * weight)
-            val = max(-1.0, min(1.0, total_err))
-
-        if val <= 0:
-            t = -val
-            c = (
-                col_gray[0] + (col_blue[0] - col_gray[0]) * t,
-                col_gray[1] + (col_blue[1] - col_gray[1]) * t,
-                col_gray[2] + (col_blue[2] - col_gray[2]) * t,
-                col_gray[3] + (col_blue[3] - col_gray[3]) * t,
-            )
-        else:
-            t = val
-            c = (
-                col_gray[0] + (col_red[0] - col_gray[0]) * t,
-                col_gray[1] + (col_red[1] - col_gray[1]) * t,
-                col_gray[2] + (col_red[2] - col_gray[2]) * t,
-                col_gray[3] + (col_red[3] - col_gray[3]) * t,
-            )
-        heat_colors[key] = c
-
-    return heat_colors
-
-
-def _compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale):
-    """BFS integration + Poisson relaxation for checker grid warped UVs."""
-    pivot_u = (isle.aabb[0] + isle.aabb[2]) * 0.5
-    pivot_v = (isle.aabb[1] + isle.aabb[3]) * 0.5
-
-
-    adj = {}
-    for tri in isle.tris:
-        keys = [(round(u, 5), round(v, 5)) for u, v in tri]
-        for j in range(3):
-            k1, k2 = keys[j], keys[(j+1) % 3]
-            if k1 != k2:
-                adj.setdefault(k1, set()).add(k2)
-                adj.setdefault(k2, set()).add(k1)
-
-
-    root_key = None
-    min_dist = float('inf')
-    for k in vert_M_sum:
-        dist = (k[0] - pivot_u)**2 + (k[1] - pivot_v)**2
-        if dist < min_dist:
-            min_dist = dist
-            root_key = k
-
-
-    w_dict = {}
-    if root_key:
-        w_dict[root_key] = root_key
-        queue = [root_key]
-        q_idx = 0
-        while q_idx < len(queue):
-            curr = queue[q_idx]
-            q_idx += 1
-            w_curr = w_dict[curr]
-            area_c = vert_area_sum[curr]
-            Mc = [m / area_c for m in vert_M_sum[curr]] if area_c > 1e-8 else [1.0, 0.0, 0.0, 1.0]
-            for nbr in adj.get(curr, []):
-                if nbr not in w_dict:
-                    area_n = vert_area_sum[nbr]
-                    Mn = [m / area_n for m in vert_M_sum[nbr]] if area_n > 1e-8 else [1.0, 0.0, 0.0, 1.0]
-                    M00 = (Mc[0] + Mn[0]) * 0.5 * scale
-                    M01 = (Mc[1] + Mn[1]) * 0.5 * scale
-                    M10 = (Mc[2] + Mn[2]) * 0.5 * scale
-                    M11 = (Mc[3] + Mn[3]) * 0.5 * scale
-                    du = nbr[0] - curr[0]
-                    dv = nbr[1] - curr[1]
-                    w_dict[nbr] = (w_curr[0] + M00*du + M01*dv,
-                                   w_curr[1] + M10*du + M11*dv)
-                    queue.append(nbr)
-
-    # Gauss-Seidel relaxation
-    if root_key and len(w_dict) > 1:
-        adj_targets = {}
-        for curr in w_dict:
-            edges = []
-            area_c = vert_area_sum[curr]
-            Mc = [m / area_c for m in vert_M_sum[curr]] if area_c > 1e-8 else [1.0, 0.0, 0.0, 1.0]
-            for nbr in adj.get(curr, []):
-                if nbr in w_dict:
-                    area_n = vert_area_sum[nbr]
-                    Mn = [m / area_n for m in vert_M_sum[nbr]] if area_n > 1e-8 else [1.0, 0.0, 0.0, 1.0]
-                    M00 = (Mc[0] + Mn[0]) * 0.5 * scale
-                    M01 = (Mc[1] + Mn[1]) * 0.5 * scale
-                    M10 = (Mc[2] + Mn[2]) * 0.5 * scale
-                    M11 = (Mc[3] + Mn[3]) * 0.5 * scale
-                    du = curr[0] - nbr[0]
-                    dv = curr[1] - nbr[1]
-                    edges.append((nbr, M00*du + M01*dv, M10*du + M11*dv))
-            if edges:
-                adj_targets[curr] = edges
-
-        for _ in range(20):
-            for curr, edges in adj_targets.items():
-                if curr == root_key:
-                    continue
-                sum_u = sum_v = 0.0
-                for (nbr, tu, tv) in edges:
-                    w_nbr = w_dict[nbr]
-                    sum_u += w_nbr[0] + tu
-                    sum_v += w_nbr[1] + tv
-                deg = len(edges)
-                w_dict[curr] = (sum_u / deg, sum_v / deg)
-
-    return w_dict
-
-
-def _stretch_compute_island(isle, tex_w, tex_h, target_texel):
-    """Compute stretch data for a single island. Returns (coords, warped_uvs, heat_colors_checker, heat_colors_heatmap)."""
-    if target_texel > 0:
-        scale = target_texel / math.sqrt(tex_w * tex_h)
-        scale_u = target_texel / tex_w
-        scale_v = target_texel / tex_h
-    else:
-        scale = math.sqrt(isle.uv_area / isle.surface_area) if isle.surface_area > 0 else 1.0
-        aspect = tex_h / tex_w if tex_w > 0 else 1.0
-        scale_u = scale * math.sqrt(aspect)
-        scale_v = scale / math.sqrt(aspect)
-
-    vert_M_sum, vert_area_sum = _compute_vertex_jacobians(isle)
-    checker_colors = _compute_heat_colors(vert_M_sum, vert_area_sum, scale_u, scale_v, 'checker')
-    heatmap_colors = _compute_heat_colors(vert_M_sum, vert_area_sum, scale_u, scale_v, 'heatmap')
-    w_dict = _compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale)
+    w_dict = stretch.compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale)
 
     coords = []
     warped_uvs = []
     checker_list = []
     heatmap_list = []
-    gray = _STRETCH_COL_GRAY
+    gray = stretch.COL_GRAY
 
     for tri in isle.tris:
         for u, v in tri:
@@ -572,6 +388,20 @@ def main():
         _ix_err = f"Unexpected error: {e}"
         _wlog(f"intersect import FAILED (unexpected): {e}")
 
+    _stretch_err = None
+    try:
+        global stretch
+        import stretch
+        _wlog("stretch imported OK")
+    except ImportError as e:
+        stretch      = None
+        _stretch_err = str(e)
+        _wlog(f"stretch import FAILED: {e}")
+    except Exception as e:
+        stretch      = None
+        _stretch_err = f"Unexpected error: {e}"
+        _wlog(f"stretch import FAILED (unexpected): {e}")
+
     stdin = sys.stdin.buffer
 
     while True:
@@ -593,6 +423,9 @@ def main():
                 if ix is None:
                     result_box[0] = {'id': job_id, 'type': 'error',
                                      'msg': f'intersect import failed: {_ix_err}'}
+                elif stretch is None:
+                    result_box[0] = {'id': job_id, 'type': 'error',
+                                     'msg': f'stretch import failed: {_stretch_err}'}
                 else:
                     result_box[0] = _process_job(job, ix)
             except Exception as e:
