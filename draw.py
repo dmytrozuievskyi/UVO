@@ -60,13 +60,7 @@ def _schedule_debounce():
         _debounce_fn = None
         if not is_calculating:
             update_batches_safe(bpy.context)
-            try:
-                for window in bpy.context.window_manager.windows:
-                    for area in window.screen.areas:
-                        if area.type == 'IMAGE_EDITOR':
-                            area.tag_redraw()
-            except Exception:
-                pass
+            _tag_redraw()
         return None  # unregister
 
     _debounce_fn = _fire
@@ -1190,7 +1184,11 @@ def update_batches_safe(context):
             any_changed or stretch._geo_batch is None)
 
         if needs_classify or needs_stretch:
-            if not _dispatch_worker_job(props):
+            # Don't pile up jobs — if a worker job is already in-flight, skip.
+            # The result poller will trigger a redraw when the current job finishes.
+            if _result_timer_fn is not None:
+                utils.log("async", "skipping dispatch — worker already busy")
+            elif not _dispatch_worker_job(props):
                 # Worker unavailable — fall back to synchronous paths
                 if needs_classify:
                     _rebuild_intersect_batches(props)
@@ -1271,13 +1269,7 @@ def depsgraph_update_handler(scene, depsgraph):
     def _do_rebuild():
         if not is_calculating:
             update_batches_safe(bpy.context)
-            try:
-                for window in bpy.context.window_manager.windows:
-                    for area in window.screen.areas:
-                        if area.type == 'IMAGE_EDITOR':
-                            area.tag_redraw()
-            except Exception:
-                pass
+            _tag_redraw()
 
     # Empty cache means we just entered edit mode — rebuild immediately
     # rather than waiting for the debounce delay.
@@ -1390,8 +1382,3 @@ def unregister():
     utils.log_clear()
 
 
-def tag_redraw(context):
-    if context.screen:
-        for area in context.screen.areas:
-            if area.type == 'IMAGE_EDITOR':
-                area.tag_redraw()

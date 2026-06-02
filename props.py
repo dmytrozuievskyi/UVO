@@ -27,22 +27,19 @@ def _sync_draw(context):
         if draw.draw_handler:
             bpy.types.SpaceImageEditor.draw_handler_remove(draw.draw_handler, 'WINDOW')
             draw.draw_handler = None
-        # Mute only removes the handler — cache stays so unmute redraws immediately.
+        
+        draw._cancel_result_poller()
+        
+        # When fully disabling an overlay (not just muting), we clear caches.
         if not props.is_muted:
             draw._obj_cache.clear()
             draw._intersect_batches['hatch']   = None
             draw._intersect_batches['checker'] = None
 
-    if context.screen:
-        for area in context.screen.areas:
-            if area.type == 'IMAGE_EDITOR':
-                area.tag_redraw()
+    draw._tag_redraw()
 
 
 def update_mute(self, context):
-    from . import draw
-    if not self.is_muted:
-        draw.full_refresh(context)
     _sync_draw(context)
 
 
@@ -58,10 +55,7 @@ def update_uv_id_opacity(self, context):
     from . import draw
     if not self.is_muted and self.show_uv_id:
         draw._rebuild_id_opacity(self)
-    if context.screen:
-        for area in context.screen.areas:
-            if area.type == 'IMAGE_EDITOR':
-                area.tag_redraw()
+    draw._tag_redraw()
 
 
 def update_intersect_opacity(self, context):
@@ -69,10 +63,7 @@ def update_intersect_opacity(self, context):
     from . import draw
     if not self.is_muted and self.show_intersect:
         draw._rebuild_intersect_opacity(self)
-    if context.screen:
-        for area in context.screen.areas:
-            if area.type == 'IMAGE_EDITOR':
-                area.tag_redraw()
+    draw._tag_redraw()
 
 
 def update_show_uv_id(self, context):
@@ -164,18 +155,14 @@ def update_stretch(self, context):
 
 
 def update_stretch_mode(self, context):
-    if context.screen:
-        for area in context.screen.areas:
-            if area.type == 'IMAGE_EDITOR':
-                area.tag_redraw()
+    from . import draw
+    draw._tag_redraw()
 
 
 def update_stretch_opacity(self, context):
     # Opacity-only change — no batch rebuild needed, just redraw.
-    if context.screen:
-        for area in context.screen.areas:
-            if area.type == 'IMAGE_EDITOR':
-                area.tag_redraw()
+    from . import draw
+    draw._tag_redraw()
 
 
 _is_updating_texel = False
@@ -196,7 +183,7 @@ def _do_texel_update():
                 draw._obj_cache[obj.name]['target_texel'] = float(obj.uv_id_props.stretch_internal_texel)
                 
         stretch.rebuild(props, draw._obj_cache, bpy.context)
-        draw.tag_redraw(bpy.context)
+        draw._tag_redraw()
     return None
 
 def update_stretch_target_texel(self, context):
