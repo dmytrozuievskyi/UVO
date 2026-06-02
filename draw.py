@@ -16,38 +16,35 @@ from . import stretch
 draw_handler   = None
 is_calculating = False
 
-# {obj_name: {'hash': int, 'id_batch': batch|None, 'islands': [Island]}}
+# {obj_name: {hash, id_batch, islands, id_coords, id_rgba, tex_w, tex_h, target_texel}}
 _obj_cache = {}
 
-_isect_self_cache  = {}   # per-object intersect results
-_isect_cross_cache = {}   # per-object-pair cross-object intersect results
+_isect_self_cache  = {}
+_isect_cross_cache = {}
 
 _intersect_batches = {'hatch': None, 'checker': None}
 
-_hatch_seg_cache       = {}   # for global_inter
-_cross_hatch_seg_cache = {}   # for global_stack
+_hatch_seg_cache       = {}
+_cross_hatch_seg_cache = {}
 
-_inter_island_tris = []   # tris fed to offscreen.render() each frame
+_inter_island_tris = []
 
-# gray = 1/(n+1), threshold = gray*1.5 — any pixel covered by 2+ islands → red fill.
-_inter_gray      = 0.5
+_inter_gray      = 0.5   # 1/(n+1); 2+ islands → exceeds threshold → red fill
 _inter_threshold = 0.6
 
 _shader = None
 
 # Async job tracking
-_classify_job_id   = 0     # id of the most recently dispatched classify job
-_stretch_job_id    = 0     # id of the most recently dispatched stretch job
-_result_timer_fn   = None  # unified bpy timer for polling worker results
-_busy_frame        = 0     # incremented by poller while jobs are in-flight
-_job_start_times   = {}    # {job_id: float_time} for round-trip tracking
+_classify_job_id   = 0
+_stretch_job_id    = 0
+_result_timer_fn   = None
+_busy_frame        = 0
+_job_start_times   = {}
 
 
-# Sentinel: pre-pass failed for this object — use n=1 fallback, keeping
-# palette offsets consistent with what the pre-pass recorded.
-_PREPASS_FAILED = object()
+_PREPASS_FAILED = object()  # sentinel: pre-pass failed, use n=1 fallback
 
-_DEBOUNCE_DELAY = 0.5   # seconds; rebuild fires once the user stops editing
+_DEBOUNCE_DELAY = 0.5
 _debounce_fn    = None
 
 
@@ -61,7 +58,7 @@ def _schedule_debounce():
         if not is_calculating:
             update_batches_safe(bpy.context)
             _tag_redraw()
-        return None  # unregister
+        return None
 
     _debounce_fn = _fire
     bpy.app.timers.register(_fire, first_interval=_DEBOUNCE_DELAY)
@@ -111,7 +108,7 @@ def _get_shader():
 
 
 def _uv_hash(bm, uv_layer):
-    # Polynomial rolling hash — order-sensitive so a rotated island hashes differently.
+    # Order-sensitive rolling hash.
     _pack = struct.pack
     h = 0
     for face in bm.faces:
@@ -148,7 +145,6 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     obj_index=0, total_objs=1,
                     group_offset=0, total_global_groups=1,
                     precomputed_groups=None):
-    # Re-check mode — it can change between depsgraph event and this call.
     if obj.mode != 'EDIT':
         return None, None, None, None, None
     bm_copy = None
@@ -195,8 +191,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                         coords.append((v[0], v[1], 0.0))
                         colors.append(obj_col)
         else:
-            # CONNECTED: one colour per 3D-connected piece, global palette so
-            # all objects share maximally separated hues.
+            # CONNECTED: one colour per 3D-connected piece, global palette.
             if precomputed_groups is _PREPASS_FAILED:
                 topo_groups = [set(f.index for f in bm_copy.faces)]
             elif precomputed_groups is not None:
@@ -249,11 +244,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 
 
 def _serialize_islands_for_worker(tiled):
-    """Pack all cached island data into plain types for the worker subprocess.
-
-    Also bundles the previous classify cache entries so the worker can do
-    per-pair caching without re-testing unchanged pairs.
-    """
+    """Pack cached island data for the worker, bundling previous classify cache state."""
     import sys as _sys
     pkg = _sys.modules.get(__package__)
 
@@ -271,7 +262,7 @@ def _serialize_islands_for_worker(tiled):
         else:
             ser_islands = []
             for isle in islands:
-                # Flatten tris and boundary_segs to avoid nested tuple overhead
+
                 flat_tris = [
                     (t[0][0], t[0][1], t[1][0], t[1][1], t[2][0], t[2][1])
                     for t in isle.tris
@@ -308,7 +299,7 @@ def _serialize_islands_for_worker(tiled):
             },
         })
 
-    # Bundle cross-cache previous state
+
     cross_prev = {}
     for pair_key, entry in _isect_cross_cache.items():
         cross_prev[pair_key] = {
@@ -327,15 +318,7 @@ def _serialize_islands_for_worker(tiled):
 
 
 def _dispatch_worker_job(props):
-    """Unified dispatch — syncs island data (Delta-IPC) and requests active computations.
-
-    Sends a single 'compute' job to the worker containing:
-    - Serialized island data (or null for unchanged objects — Delta-IPC)
-    - do_classify / do_stretch flags based on which overlays are active
-    - tex settings per object (for stretch)
-
-    Returns True if dispatched, False if worker unavailable.
-    """
+    """Sync island data (Delta-IPC) and dispatch a unified compute job to the worker."""
     global _classify_job_id, _stretch_job_id
     import sys as _sys
     pkg = _sys.modules.get(__package__)
@@ -345,11 +328,10 @@ def _dispatch_worker_job(props):
     do_classify = props.show_intersect and not props.is_muted
     do_stretch  = props.show_stretch  and not props.is_muted
 
-    # Always sync island data regardless of which computation is requested.
+
     tiled = (props.intersect_uv_mode == 'TILED')
     objects, cross_prev = _serialize_islands_for_worker(tiled)
 
-    # Attach stretch tex settings to each object entry.
     if do_stretch:
         for obj_entry in objects:
             cache = _obj_cache.get(obj_entry['name'])
@@ -359,7 +341,7 @@ def _dispatch_worker_job(props):
                 obj_entry['target_texel'] = cache.get('target_texel', 0.0)
 
     job_id = pkg.next_job_id()
-    # Both job-id slots share the same id — one job, one result.
+
     if do_classify:
         _classify_job_id = job_id
     if do_stretch:
@@ -402,8 +384,7 @@ def _start_result_poller():
             _result_timer_fn = None
             return None
 
-        # Drain all available results in one tick — prevents queue build-up
-        # when classify and stretch results arrive close together.
+        # Drain all available results in one tick.
         got_any = False
         while True:
             try:
@@ -442,7 +423,6 @@ def _start_result_poller():
             _tag_redraw()
             return 0.05
 
-        # Processed at least one result — stop if no more pending jobs
         if _classify_job_id != 0 or _stretch_job_id != 0:
             _busy_frame += 1
             return 0.05
@@ -485,12 +465,7 @@ def _tag_redraw():
 
 
 def _apply_worker_result(result):
-    """Apply a compute_result from the worker.
-
-    Handles both classify and stretch portions — each is only applied
-    if the corresponding key is present in the result dict.
-    Called from the polling timer, always on the main thread.
-    """
+    """Apply a compute_result from the worker (classify and/or stretch)."""
     job_id = result.get('id')
     
     import time
@@ -499,7 +474,7 @@ def _apply_worker_result(result):
         duration = (time.time() - start_time) * 1000.0
         utils.log("timing", f"async job {job_id} round-trip={duration:.1f}ms")
 
-    # ── Apply classify portion ───────────────────────────────────────────
+    # ── Classify ──
     if 'self_results' in result:
         self_results  = result.get('self_results', {})
         cross_results = result.get('cross_results', {})
@@ -511,7 +486,7 @@ def _apply_worker_result(result):
         for pair_key, entry in cross_results.items():
             _isect_cross_cache[pair_key] = entry
 
-        # Evict stale entries for objects no longer in cache
+
         for name in list(_isect_self_cache):
             if name not in _obj_cache:
                 del _isect_self_cache[name]
@@ -534,7 +509,7 @@ def _apply_worker_result(result):
 
         utils.log("async", f"classify result applied, job_id={job_id}")
 
-    # ── Apply stretch portion ───────────────────────────────────────────
+    # ── Stretch ──
     if 'stretch_results' in result:
         stretch_data = result.get('stretch_results', {})
         if stretch_data:
@@ -545,11 +520,7 @@ def _apply_worker_result(result):
 
 
 def _rebuild_hatch_from_cache(props):
-    """Rebuild hatch/checker GPU batches from the current classify caches.
-
-    Called after async classify result arrives — does NOT re-run classify.
-    Identical logic to the batch-building part of _rebuild_intersect_batches.
-    """
+    """Rebuild hatch/checker GPU batches from classify caches (no re-classification)."""
     global _inter_island_tris, _inter_gray, _inter_threshold
 
     shader   = _get_shader()
@@ -618,7 +589,7 @@ def _rebuild_hatch_from_cache(props):
                 global_inter.add(fi)
                 tile_crossing_flat.add(fi)
 
-    # Build hatch/checker batches (reuses seg cache)
+
     hatch_coords, hatch_colors     = [], []
     checker_coords, checker_colors = [], []
     checker_col = (1.0, 1.0, 1.0, opacity)
@@ -678,7 +649,7 @@ def _island_in_tile0(isle):
 
 def _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
                           tile_crossing_flat, tiled):
-    """Populate _inter_island_tris for the offscreen red fill pass."""
+    """Populate _inter_island_tris for the offscreen red-fill pass."""
     global _inter_island_tris, _inter_gray, _inter_threshold
 
     seen_norm_keys = set()
@@ -857,7 +828,7 @@ def _rebuild_intersect_batches(props):
         if pk not in active_pairs:
             del _isect_cross_cache[pk]
 
-    # Tile-crossing islands straddle a UDIM boundary — flag as errors, hatch + red fill.
+    # Tile-crossing islands → flag as errors.
     tile_crossing_flat = set()
     if tiled:
         for name, cache in _obj_cache.items():
@@ -876,7 +847,7 @@ def _rebuild_intersect_batches(props):
     _hits = 0
     _miss = 0
 
-    # Collect all uv_keys present this rebuild for cache eviction at the end.
+
     live_keys = {isle.uv_key for isle in all_islands_flat if isle.uv_key is not None}
 
     for fi, isle in enumerate(all_islands_flat):
@@ -910,7 +881,7 @@ def _rebuild_intersect_batches(props):
                 checker_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
                 checker_colors.extend((checker_col, checker_col))
 
-    # Evict entries whose islands no longer exist or have moved (uv_key changed).
+
     for dead in [k for k in _hatch_seg_cache       if k not in live_keys]:
         del _hatch_seg_cache[dead]
     for dead in [k for k in _cross_hatch_seg_cache if k not in live_keys]:
@@ -924,11 +895,7 @@ def _rebuild_intersect_batches(props):
     _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
     _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
 
-    # Offscreen red-fill tris — tiled mode rules:
-    #   Tile-crossing touching tile 0 → raw tris ×2 (guaranteed red fill in place)
-    #   Pair with one island in tile 0 → both normalized to tile 0
-    #   Pair both in tile 1+ → hatch only, no red fill
-    #   UDIM mode → all inter islands, uv_key dedup to avoid double-drawing stacked pairs
+
 
 
 
@@ -943,18 +910,18 @@ def _rebuild_intersect_batches(props):
             touches_tile0 = (mn_u < 1.0 - ix.UV_EPS and mx_u > ix.UV_EPS and
                              mn_v < 1.0 - ix.UV_EPS and mx_v > ix.UV_EPS)
             if touches_tile0:
-                # Twice → 2*gray → guaranteed red fill.
+
                 inter_tris_raw.append(isle.tris)
                 inter_tris_raw.append(isle.tris)
                 n_unique += 1
 
         for fi_a, fi_b in global_inter_pairs:
             if fi_a in tile_crossing_flat or fi_b in tile_crossing_flat:
-                continue   # tile-crossing already handled above
+                continue
             isle_a = all_islands_flat[fi_a]
             isle_b = all_islands_flat[fi_b]
             if not _island_in_tile0(isle_a) and not _island_in_tile0(isle_b):
-                continue   # both in tile 1+: hatch only
+                continue
             norm_a = ix.normalize_island(isle_a)
             norm_b = ix.normalize_island(isle_b)
             for norm in (norm_a, norm_b):
@@ -1007,10 +974,7 @@ def _rebuild_id_opacity(props):
 
 
 def _rebuild_intersect_opacity(props):
-    """Rebuild hatch/checker batches with new opacity — reuses cached classification and hatch geometry.
-
-    Does NOT re-run classify_islands / classify_islands_cross.
-    """
+    """Rebuild hatch/checker batches with new opacity (no re-classification)."""
     if not _obj_cache:
         return
 
@@ -1018,7 +982,7 @@ def _rebuild_intersect_opacity(props):
     shader      = _get_shader()
     checker_col = (1.0, 1.0, 1.0, opacity)
 
-    # Reconstruct flat island list and base indices (same logic as _rebuild_intersect_batches).
+
     all_islands_flat = [
         isle
         for cache in _obj_cache.values()
@@ -1033,7 +997,7 @@ def _rebuild_intersect_opacity(props):
         base_indices[name] = idx
         idx += len(cache.get('islands') or [])
 
-    # Pull global_inter / global_stack straight from the existing classify caches.
+
     global_inter = set()
     global_stack = set()
 
@@ -1113,7 +1077,7 @@ def update_batches_safe(context):
         any_changed  = False
         active_names = set()
 
-        # Sort so colour assignment divides the hue wheel by global total first.
+
         edit_objs = sorted(
             [o for o in context.scene.objects
              if o.type == 'MESH' and o.mode == 'EDIT'],
@@ -1121,8 +1085,7 @@ def update_batches_safe(context):
         )
         total_objs = len(edit_objs)
 
-        # Pre-count connected groups across all objects so the global palette
-        # gives maximally separated hues across every edit-mode object.
+        # Pre-count connected groups for global palette.
         group_offsets       = {}
         precomp_groups      = {}
         total_global_groups = 0
@@ -1130,7 +1093,7 @@ def update_batches_safe(context):
             for obj in edit_objs:
                 try:
                     bm_live = bmesh.from_edit_mesh(obj.data)
-                    # Read-only — safe on bm_live directly, no copy needed.
+
                     groups = _mesh_connected_groups(bm_live)
                     precomp_groups[obj.name] = groups
                     n = len(groups)
@@ -1156,14 +1119,13 @@ def update_batches_safe(context):
                     'hash':      new_hash,
                     'id_batch':  new_id_batch,
                     'islands':   new_islands,
-                    'id_coords': new_id_coords,   # raw (x,y,z) list — used by _rebuild_id_opacity
-                    'id_rgba':   new_id_rgba,     # raw (r,g,b,a) list — alpha swapped on opacity change
+                    'id_coords': new_id_coords,
+                    'id_rgba':   new_id_rgba,
                     'tex_w':     float(obj.uv_id_props.tex_res_x),
                     'tex_h':     float(obj.uv_id_props.tex_res_y),
                     'target_texel': float(obj.uv_id_props.stretch_internal_texel),
                 }
-                # Do NOT pop _isect_self_cache or _isect_cross_cache here!
-                # The worker needs the previous cache state to do per-island pair-cache diffs.
+                # Keep classify caches — worker needs previous state for pair-cache diffs.
                 any_changed = True
             elif new_hash is not None and obj.name not in _obj_cache:
                 any_changed = True
@@ -1177,19 +1139,18 @@ def update_batches_safe(context):
                         del _isect_cross_cache[pk]
                 any_changed = True
 
-        # Dispatch a unified worker job when intersect or stretch needs updating.
+
         needs_classify = props.show_intersect and not props.is_muted and (
             any_changed or (_intersect_batches['hatch'] is None and _result_timer_fn is None))
         needs_stretch = props.show_stretch and not props.is_muted and (
             any_changed or stretch._geo_batch is None)
 
         if needs_classify or needs_stretch:
-            # Don't pile up jobs — if a worker job is already in-flight, skip.
-            # The result poller will trigger a redraw when the current job finishes.
+            # Skip if worker already busy; poller will trigger redraw on completion.
             if _result_timer_fn is not None:
                 utils.log("async", "skipping dispatch — worker already busy")
             elif not _dispatch_worker_job(props):
-                # Worker unavailable — fall back to synchronous paths
+                # Sync fallback
                 if needs_classify:
                     _rebuild_intersect_batches(props)
                 if needs_stretch:
@@ -1197,7 +1158,7 @@ def update_batches_safe(context):
             else:
                 _start_result_poller()
 
-        # Clear disabled overlays
+
         if not (props.show_intersect and not props.is_muted):
             _intersect_batches['hatch']   = None
             _intersect_batches['checker'] = None
@@ -1234,7 +1195,7 @@ def depsgraph_update_handler(scene, depsgraph):
             _intersect_batches['checker'] = None
             padding.clear()
             stretch.clear()
-        # Clear tris and mark dirty so the red fill disappears on leaving edit mode.
+
         global _inter_island_tris
         _inter_island_tris = []
         offscreen.mark_dirty()
@@ -1248,14 +1209,12 @@ def depsgraph_update_handler(scene, depsgraph):
             pass
         return
 
-    # If the cache is empty but we are in edit mode and overlays are enabled,
-    # it means we just entered edit mode (or just enabled an overlay).
-    # We must force a rebuild even if is_updated_geometry is false.
+    # Empty cache in edit mode → just entered edit or enabled an overlay.
     force_rebuild = False
     if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch):
         force_rebuild = True
 
-    # Detect objects added to multi-object edit that aren't in our cache yet.
+
     if not force_rebuild:
         for obj in bpy.context.scene.objects:
             if obj.type == 'MESH' and obj.mode == 'EDIT' and obj.name not in _obj_cache:
@@ -1271,8 +1230,7 @@ def depsgraph_update_handler(scene, depsgraph):
             update_batches_safe(bpy.context)
             _tag_redraw()
 
-    # Empty cache means we just entered edit mode — rebuild immediately
-    # rather than waiting for the debounce delay.
+    # Empty cache → just entered edit mode, rebuild immediately.
     if not _obj_cache:
         _do_rebuild()
     else:
@@ -1296,12 +1254,12 @@ def draw_callback():
         gpu.state.depth_test_set('NONE')
         shader.bind()
 
-        # Pass 1: stretch overlay (checker + heatmap)
+
         if props.show_stretch:
             stretch.draw(props, shader, bpy.context)
-            shader.bind() # restore shader in case stretch changed it
+            shader.bind()
 
-        # Pass 2: UV ID color fill
+
         if props.show_uv_id:
             for cache in _obj_cache.values():
                 b = cache.get('id_batch')
@@ -1309,16 +1267,15 @@ def draw_callback():
                     b.draw(shader)
 
         if props.show_intersect:
-            # Pass 3: hatch on intersecting islands 
             gpu.state.line_width_set(2.0)
             if _intersect_batches['hatch']:
                 _intersect_batches['hatch'].draw(shader)
 
-            # Pass 4: cross-hatch on stacked islands 
+
             if _intersect_batches['checker']:
                 _intersect_batches['checker'].draw(shader)
 
-            # Pass 5: offscreen overlap fill (always drawn if intersections exist)
+
             if _inter_island_tris:
                 utils.log("pass4", f"tris={len(_inter_island_tris)}")
                 if offscreen.check_view_matrix():
@@ -1327,7 +1284,7 @@ def draw_callback():
                 offscreen.composite(props.intersect_opacity, _inter_threshold)
                 shader.bind()  # restore after offscreen composite
 
-        # Pass 6: padding outlines
+
         if props.show_padding:
             if padding.batches['ok']:
                 padding.batches['ok'].draw(shader)
@@ -1338,7 +1295,7 @@ def draw_callback():
         utils.log("draw", f"error: {e}")
         traceback.print_exc()
     finally:
-        # Restore GPU state — exceptions here would corrupt Blender's own rendering.
+
         gpu.state.blend_set('NONE')
         gpu.state.depth_test_set('LESS_EQUAL')
         gpu.state.line_width_set(1.0)

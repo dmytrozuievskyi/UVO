@@ -56,8 +56,7 @@ def _build_contours(segs):
             pts.append(p_n2)
             cur_rk = rk2
 
-        # Discard open chains — treating them as closed polygons produces
-        # incorrect miter offsets at the broken endpoints.
+        # Discard open chains.
         if cur_rk != start_rk:
             continue
 
@@ -91,25 +90,19 @@ def _point_in_island(px, py, tris):
 
 
 def _offset_contour(pts, res_x, res_y, pad_px, island_tris):
-    """Compute a closed offset contour in UV space.
-
-    Works in pixel space internally for uniform texel offsets regardless of
-    aspect ratio. Uses miter joins at each vertex so corners meet cleanly.
-    Winding is determined by signed area; a point-in-triangle test on the
-    first non-degenerate edge corrects holes regardless of loop winding.
-    """
+    """Compute a closed offset contour in UV space using miter joins."""
     n = len(pts)
 
     px = [(p[0] * res_x, p[1] * res_y) for p in pts]
 
-    # Signed area → winding sign for consistent outward normals
+
     area = 0.0
     for i in range(n):
         j = (i + 1) % n
         area += px[i][0] * px[j][1] - px[j][0] * px[i][1]
     sign = 1.0 if area > 0.0 else -1.0
 
-    # Per-edge outward unit normals in pixel space
+
     en_x = []
     en_y = []
     for i in range(n):
@@ -124,7 +117,7 @@ def _offset_contour(pts, res_x, res_y, pad_px, island_tris):
             en_x.append( sign * dy / L)
             en_y.append(-sign * dx / L)
 
-    # Verify outward direction: step from first edge midpoint — flip if inside.
+    # Verify outward direction.
     flipped = False
     for i in range(n):
         if abs(en_x[i]) < 1e-10 and abs(en_y[i]) < 1e-10:
@@ -142,7 +135,7 @@ def _offset_contour(pts, res_x, res_y, pad_px, island_tris):
         en_x = [-v for v in en_x]
         en_y = [-v for v in en_y]
 
-    # Per-vertex miter offset, capped at _MITER_CAP for sharp concave corners.
+
     vx = []
     vy = []
     for i in range(n):
@@ -215,14 +208,10 @@ def _zones_collide(off_a, off_b):
 
 
 def _find_bad_islands(islands_data, pad_px, shared_seg_cache=None):
-    """Return set of island indices whose padding zones overlap.
-
-    shared_seg_cache: pre-computed {index: segs} reused when display and
-    detection resolution match (square textures), avoiding redundant work.
-    """
+    """Return set of island indices whose padding zones overlap."""
     n     = len(islands_data)
 
-    # Phase 1: spatial grid cull on expanded AABBs.
+
     exp_aabbs = []
     for isle, res_x, res_y in islands_data:
         pad_u = pad_px / res_x
@@ -261,7 +250,7 @@ def _find_bad_islands(islands_data, pad_px, shared_seg_cache=None):
     if not candidates:
         return set()
 
-    # Phase 2: precise offset-segment collision for candidates only.
+
     off_cache = {}
 
     def _get(i):

@@ -66,7 +66,7 @@ def build_geometry_batch(obj_cache, props):
         coords = []
         colors = []
 
-        # Linear color space
+
         col_blue = (0.0, 0.0, 1.0, 1.0)
         col_gray = (0.214, 0.214, 0.214, 0.0)
         col_red  = (1.0, 0.0, 0.0, 1.0)
@@ -90,10 +90,9 @@ def build_geometry_batch(obj_cache, props):
                     scale_u = scale * math.sqrt(aspect)
                     scale_v = scale / math.sqrt(aspect)
 
-                # 1. Area-weighted average of Jacobians per UV vertex
                 vert_M_sum, vert_area_sum = stretch.compute_vertex_jacobians(isle)
 
-                # 2. Pre-compute heat color per unique vertex
+
                 heat_colors = {}
                 for key, area in vert_area_sum.items():
                     if area > 1e-8:
@@ -106,11 +105,11 @@ def build_geometry_batch(obj_cache, props):
                     M10 = M_avg[2] * scale_u
                     M11 = M_avg[3] * scale_v
 
-                    # Area Stretch: determinant of M (which maps UV length to 3D length)
+
                     det_M = M00 * M11 - M01 * M10
                     area_stretch = math.sqrt(abs(det_M)) if det_M != 0 else 1.0
 
-                    # Angle Stretch: ratio of singular values
+
                     E = (M00 + M11) * 0.5
                     F = (M00 - M11) * 0.5
                     G = (M10 + M01) * 0.5
@@ -128,7 +127,7 @@ def build_geometry_batch(obj_cache, props):
                     area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
                     angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
 
-                    # Weighted sum of area + angle error, signed by area direction
+
                     weight = 0.5
                     sign = 1.0 if area_err >= 0 else -1.0
                     total_err = sign * (abs(area_err) * (1.0 - weight) + angle_err * weight)
@@ -140,7 +139,7 @@ def build_geometry_batch(obj_cache, props):
                     else:
                         heat_colors[key] = _lerp_color(col_gray, col_red, val)
 
-                # 3. Emit tri vertices with pre-computed colors
+
                 for tri in isle.tris:
                     for u, v in tri:
                         key = (round(u, 5), round(v, 5))

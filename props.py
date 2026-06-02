@@ -30,7 +30,7 @@ def _sync_draw(context):
         
         draw._cancel_result_poller()
         
-        # When fully disabling an overlay (not just muting), we clear caches.
+        # When disabling (not just muting), clear caches.
         if not props.is_muted:
             draw._obj_cache.clear()
             draw._intersect_batches['hatch']   = None
@@ -44,7 +44,7 @@ def update_mute(self, context):
 
 
 def update_uv_id(self, context):
-    # Mode changed — full rebuild needed to reassign colours.
+
     from . import draw
     draw.full_refresh(context)
     _sync_draw(context)
@@ -75,7 +75,7 @@ def update_intersect(self, context):
 
 
 def update_intersect_settings(self, context):
-    # Mode or opacity changed — full rebuild needed.
+
     from . import draw
     draw.full_refresh(context)
     _sync_draw(context)
@@ -160,7 +160,7 @@ def update_stretch_mode(self, context):
 
 
 def update_stretch_opacity(self, context):
-    # Opacity-only change — no batch rebuild needed, just redraw.
+
     from . import draw
     draw._tag_redraw()
 

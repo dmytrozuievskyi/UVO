@@ -18,13 +18,10 @@ import threading
 import time
 import traceback
 
-# PROTECT IPC PIPE FROM ROGUE PRINTS:
-# Blender does not drain stderr. Never print() directly to it, or the 
-# 4KB OS buffer will fill up and permanently freeze the worker thread.
+# Redirect stdout to stderr so print() doesn't corrupt the IPC pipe.
 ipc_out = sys.stdout.buffer
 sys.stdout = sys.stderr
 
-# Worker-side timeout.
 JOB_TIMEOUT_SECS = 10.0
 
 _LOG_PATH = None
@@ -86,8 +83,6 @@ def _deserialize_island(d, ix):
     isle.jacobians     = d.get('jacobians', [])
     isle.uv_area       = d.get('uv_area', 0.0)
     isle.surface_area  = d.get('surface_area', 0.0)
-    # aabb is computed by Island.__init__ from tris, but we restore the
-    # serialized value to ensure consistency with the main thread.
     if 'aabb' in d:
         isle.aabb = d['aabb']
     return isle
@@ -229,15 +224,7 @@ def _run_stretch(objects, job_id):
 
 
 def _handle_compute(job, ix):
-    """Unified handler: sync mesh cache, then run classify and/or stretch.
-
-    Step 1 — Delta-IPC: deserialize any changed island data into _worker_mesh_cache.
-    Step 2 — Classify:  run if do_classify=True, returns self/cross results.
-    Step 3 — Stretch:   run if do_stretch=True, returns per-object vertex data.
-
-    Both computations share the same (already-synced) island data, so there is
-    no race between them and no stale-data risk.
-    """
+    """Sync mesh cache (Delta-IPC), then run classify and/or stretch."""
     obj_data    = job.get('objects', [])
     job_id      = job.get('id', '?')
     tiled       = job.get('tiled', True)
@@ -247,7 +234,7 @@ def _handle_compute(job, ix):
 
     t0 = time.perf_counter()
 
-    # ── Step 1: Sync _worker_mesh_cache (Delta-IPC) ──────────────────────────
+    # Sync _worker_mesh_cache (Delta-IPC)
     active_names = {od['name'] for od in obj_data}
     for name in list(_worker_mesh_cache):
         if name not in active_names:
@@ -294,13 +281,13 @@ def _handle_compute(job, ix):
 
     result = {'id': job_id, 'type': 'compute_result'}
 
-    # ── Step 2: Classify ──────────────────────────────────────────────────────
+    # Classify
     if do_classify:
         self_r, cross_r = _run_classify(objects, cross_prev, tiled, job_id, ix)
         result['self_results']  = self_r
         result['cross_results'] = cross_r
 
-    # ── Step 3: Stretch ───────────────────────────────────────────────────────
+    # Stretch
     if do_stretch:
         result['stretch_results'] = _run_stretch(objects, job_id)
 
@@ -429,7 +416,7 @@ def _compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale):
     pivot_u = (isle.aabb[0] + isle.aabb[2]) * 0.5
     pivot_v = (isle.aabb[1] + isle.aabb[3]) * 0.5
 
-    # Build adjacency
+
     adj = {}
     for tri in isle.tris:
         keys = [(round(u, 5), round(v, 5)) for u, v in tri]
@@ -439,7 +426,7 @@ def _compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale):
                 adj.setdefault(k1, set()).add(k2)
                 adj.setdefault(k2, set()).add(k1)
 
-    # Find root closest to center
+
     root_key = None
     min_dist = float('inf')
     for k in vert_M_sum:
@@ -448,7 +435,7 @@ def _compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale):
             min_dist = dist
             root_key = k
 
-    # BFS integrate
+
     w_dict = {}
     if root_key:
         w_dict[root_key] = root_key
@@ -474,7 +461,7 @@ def _compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale):
                                    w_curr[1] + M10*du + M11*dv)
                     queue.append(nbr)
 
-    # Gauss-Seidel relaxation (20 iterations)
+    # Gauss-Seidel relaxation
     if root_key and len(w_dict) > 1:
         adj_targets = {}
         for curr in w_dict:
@@ -555,7 +542,7 @@ def main():
     if addon_dir not in sys.path:
         sys.path.insert(0, addon_dir)
 
-    # Only setup logging if requested
+
     global DEBUG_MODE, _LOG_PATH
     if "--debug" in sys.argv:
         DEBUG_MODE = True
@@ -597,7 +584,7 @@ def main():
         job_type = job.get('type', '?')
         _wlog(f"received job id={job_id} type={job_type!r}")
 
-        # Hard timeout — hung classify exits the process so __init__.py can restart
+        # Hard timeout — hung job exits so __init__.py can restart
         result_box = [None]
         error_box  = [None]
 

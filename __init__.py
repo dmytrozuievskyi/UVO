@@ -7,14 +7,13 @@ import subprocess
 import sys
 import threading
 
-# Background worker process
-# Uses subprocess.Popen + stdin/stdout pipes with length-prefixed pickle frames.
-# This avoids multiprocessing module-name-resolution issues in Blender extensions.
+# Background worker (Popen + length-prefixed pickle over stdin/stdout).
+# Avoids multiprocessing module-name-resolution issues in Blender extensions.
 
 _worker_process  = None    # subprocess.Popen
 _worker_lock     = threading.Lock()
 _next_job_id     = 0
-_result_queue    = None   # Queue created fresh on each start_worker() — clears stale results
+_result_queue    = None   # fresh Queue per start_worker()
 _reader_thread   = None   # background thread reading worker stdout
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
 
@@ -138,7 +137,6 @@ def start_worker():
 
     clear_synced_objects()
 
-    # Fresh queue on every start — flushes any stale results from the previous session.
     _result_queue = _queue_mod.Queue()
 
     addon_dir  = os.path.dirname(os.path.abspath(__file__))
@@ -151,7 +149,6 @@ def start_worker():
     python_exe = sys.executable
     cmd = [python_exe, worker_script, addon_dir]
     
-    # Send --debug flag if enabled in addon preferences
     if utils._debug_enabled():
         cmd.append("--debug")
 
@@ -193,7 +190,7 @@ def stop_worker():
     _worker_process = None
 
 
-if "bpy" in locals():  # Support F8 / Reload Scripts
+if "bpy" in locals():
     importlib.reload(utils)
     importlib.reload(worker)
     importlib.reload(offscreen)
@@ -257,7 +254,7 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
 
 def register():
     bpy.utils.register_class(UVOAddonPreferences)
-    # Icons must load before UI registers — falls back to 'GROUP_UVS' if missing.
+    # Load icons before UI registers.
     pcoll = bpy.utils.previews.new()
     try:
         icons_dir = os.path.join(os.path.dirname(__file__), "icons")
@@ -267,7 +264,7 @@ def register():
             name = f"clock_frame_{i:02d}"
             pcoll.load(name, os.path.join(icons_dir, f"{name}.png"), 'IMAGE')
         
-        # Force immediate decode — prevents the lazy-load spinner on first toggle.
+        # Force decode to prevent lazy-load spinner on first toggle.
         _ = pcoll["uv_overlay_on"].icon_id
         _ = pcoll["uv_overlay_on"].image_size
         _ = pcoll["uv_overlay_off"].icon_id

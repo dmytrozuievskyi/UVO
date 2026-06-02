@@ -4,8 +4,8 @@ import traceback
 from gpu_extras.batch import batch_for_shader
 from . import stretch
 
-_ZOOM_THRESHOLDS = [4.0, 8.0, 16.0, 32.0]   # boundaries between levels 1–5
-_ZOOM_DIVISIONS  = [10, 20, 40, 80, 160]    # grid cells per UV tile per axis
+_ZOOM_THRESHOLDS = [4.0, 8.0, 16.0, 32.0]
+_ZOOM_DIVISIONS  = [10, 20, 40, 80, 160]
 
 
 def get_zoom(context):
@@ -13,7 +13,6 @@ def get_zoom(context):
     try:
         import gpu
         matrix = gpu.matrix.get_projection_matrix()
-        # matrix[0][0] maps UV coordinates to NDC [-1, 1]
         pixels_per_uv = abs(matrix[0][0]) * context.region.width * 0.5
         return max(0.01, pixels_per_uv / 256.0)
     except Exception:
@@ -41,8 +40,7 @@ void main() {
 }
 """
 
-# Per-fragment checker. mod() is used instead of % to avoid negative-modulo
-# issues with uvCoord values below zero (islands outside the 0-1 tile).
+# Per-fragment checker. mod() avoids negative-modulo issues outside 0-1 tile.
 _FRAG_SRC = """
 void main() {
     float d  = float(divisions);
@@ -55,12 +53,9 @@ void main() {
     vec3 col = (cell == 1) ? colLight : colDark;
 
     if (use_tint == 1) {
-        float tint = heatColor.a;  // alpha carries how much deviation exists
-        // Standard cells are very dark (0.045 / 0.10). 
-        // For vibrant colors, target a much brighter color when stretched.
+        float tint = heatColor.a;  // deviation magnitude
+        // Dark cells get dimmer tint.
         vec3 targetColor = (cell == 1) ? heatColor.rgb : (heatColor.rgb * 0.5);
-        
-        // Punch small values by multiplying tint, but hard-cap at 0.75
         float mixFactor = min(tint * 1.5, 0.75);
         col = mix(col, targetColor, mixFactor);
     }
@@ -70,7 +65,7 @@ void main() {
 }
 """
 
-_shader = None   # cached once per session
+_shader = None
 
 def _get_shader():
     global _shader
@@ -140,10 +135,9 @@ def build_geometry_batch(obj_cache, props):
             pivot_u = (isle.aabb[0] + isle.aabb[2]) * 0.5
             pivot_v = (isle.aabb[1] + isle.aabb[3]) * 0.5
 
-            # 1. Area-weighted average of Jacobians per UV vertex
             vert_M_sum, vert_area_sum = stretch.compute_vertex_jacobians(isle)
 
-            # 1.5. Compute heat colors per vertex
+
             col_blue = (0.0, 0.0, 1.0, 1.0)
             col_gray = (0.214, 0.214, 0.214, 0.0)
             col_red  = (1.0, 0.0, 0.0, 1.0)
@@ -179,7 +173,7 @@ def build_geometry_batch(obj_cache, props):
                 area_err = math.log2(area_stretch) if area_stretch > 1e-8 else 0.0
                 angle_err = math.log2(abs(angle_stretch)) if abs(angle_stretch) > 1e-8 else 0.0
 
-                # Additive area + angle error
+
                 sign = 1.0 if area_err >= 0 else -1.0
                 total_err = area_err + sign * angle_err
 
@@ -207,7 +201,7 @@ def build_geometry_batch(obj_cache, props):
                     )
                 heat_colors[key] = c
 
-            # 2. Build vertex adjacency for BFS integration
+
             adj = {}
             for tri in isle.tris:
                 keys = [(round(u, 5), round(v, 5)) for u, v in tri]
@@ -217,7 +211,7 @@ def build_geometry_batch(obj_cache, props):
                         adj.setdefault(k1, set()).add(k2)
                         adj.setdefault(k2, set()).add(k1)
 
-            # 3. Find root vertex closest to center
+
             root_key = None
             min_dist = float('inf')
             for k in vert_M_sum.keys():
@@ -226,10 +220,9 @@ def build_geometry_batch(obj_cache, props):
                     min_dist = dist
                     root_key = k
 
-            # 4. BFS integrate to compute pre-warped coordinates
+
             w_dict = {}
             if root_key:
-                # Start root exactly at its own UV
                 w_dict[root_key] = root_key
                 queue = [root_key]
                 q_idx = 0
@@ -252,7 +245,7 @@ def build_geometry_batch(obj_cache, props):
                             else:
                                 Mn = [1.0, 0.0, 0.0, 1.0]
 
-                            # Average Jacobian along the edge, apply target scale
+
                             M00 = (Mc[0] + Mn[0]) * 0.5 * scale
                             M01 = (Mc[1] + Mn[1]) * 0.5 * scale
                             M10 = (Mc[2] + Mn[2]) * 0.5 * scale
@@ -267,9 +260,9 @@ def build_geometry_batch(obj_cache, props):
                             w_dict[nbr] = (w_n_u, w_n_v)
                             queue.append(nbr)
 
-            # 5. Gauss-Seidel Relaxation (Poisson Solver)
+            # Gauss-Seidel Relaxation
             if root_key and len(w_dict) > 1:
-                # Precompute target vectors for each edge
+
                 adj_targets = {}
                 for curr in w_dict:
                     edges = []
@@ -286,7 +279,7 @@ def build_geometry_batch(obj_cache, props):
                             M10 = (Mc[2] + Mn[2]) * 0.5 * scale
                             M11 = (Mc[3] + Mn[3]) * 0.5 * scale
 
-                            # Target vector is from nbr to curr
+
                             du = curr[0] - nbr[0]
                             dv = curr[1] - nbr[1]
                             t_u = M00 * du + M01 * dv
@@ -297,11 +290,11 @@ def build_geometry_batch(obj_cache, props):
                     if edges:
                         adj_targets[curr] = edges
 
-                # Relax for 20 iterations to smooth curl error across all edges
+
                 for _ in range(20):
                     for curr, edges in adj_targets.items():
                         if curr == root_key:
-                            continue  # Keep the center pivot pinned to prevent drift
+                            continue
                         
                         sum_u = 0.0
                         sum_v = 0.0
@@ -313,11 +306,11 @@ def build_geometry_batch(obj_cache, props):
                         deg = len(edges)
                         w_dict[curr] = (sum_u / deg, sum_v / deg)
 
-            # 6. Output batch data
+
             for i, tri in enumerate(isle.tris):
                 for u, v in tri:
                     key = (round(u, 5), round(v, 5))
-                    # Fallback to pure affine if vertex is disconnected
+
                     if key in w_dict:
                         w_u, w_v = w_dict[key]
                     else:

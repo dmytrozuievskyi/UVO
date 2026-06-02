@@ -29,7 +29,6 @@ class Island:
             all_u = [v[0] for t in tris for v in t]
             all_v = [v[1] for t in tris for v in t]
             self.aabb = (min(all_u), min(all_v), max(all_u), max(all_v))
-            # Precomputed centroids for proximity sorting in _sat_overlap.
             self.tri_centers = [
                 ((t[0][0]+t[1][0]+t[2][0]) / 3.0,
                  (t[0][1]+t[1][1]+t[2][1]) / 3.0)
@@ -45,7 +44,7 @@ def _uvclose(a, b):
 
 
 def _build_uv_adjacency(bm, uv_layer):
-    """One O(total_loops) pass to build face-edge→loop map, then O(1) lookups per edge."""
+    """Build face adjacency by UV connectivity. O(total_loops) pass."""
     fe_to_loop = {}
     for face in bm.faces:
         for loop in face.loops:
@@ -71,11 +70,7 @@ def _build_uv_adjacency(bm, uv_layer):
 
 
 def _extract_boundary_segs(island_faces, face_index_set, uv_layer, uv_adj):
-    """Collect UV edges forming the outer contour of the island.
-
-    An edge is a boundary if its neighbour is outside the island or
-    not UV-adjacent (i.e. there is a UV seam between them).
-    """
+    """Collect UV edges forming the outer contour of the island."""
     segs = []
     for face in island_faces:
         uv_nbrs = uv_adj.get(face.index, [])
@@ -102,8 +97,7 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
     bm_copy.faces.ensure_lookup_table()
     uv_adj = _build_uv_adjacency(bm_copy, uv_layer)
 
-    # Pass 1: flood-fill to get total island count before colouring,
-    # so hue wheel slots can be divided equally upfront.
+    # Flood-fill to get total island count before colouring.
     face_groups = []
     visited     = set()
 
@@ -128,7 +122,7 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
 
     total = len(face_groups)
 
-    # Pass 2: build Island objects and assign colours.
+
     islands = []
     for idx, face_index_set in enumerate(face_groups):
         col = utils_mod.get_distinct_color(
@@ -184,23 +178,23 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
                 p1 = l1.vert.co
                 p2 = l2.vert.co
 
-            # Save the triangle UVs
+
             tris.append(((uv0.x, uv0.y), (uv1.x, uv1.y), (uv2.x, uv2.y)))
 
-            # UV area
+
             eu = uv1 - uv0
             ev = uv2 - uv0
             det_uv = eu.x * ev.y - eu.y * ev.x
             uv_area = abs(det_uv) * 0.5
             total_uv_area += uv_area
 
-            # 3D area
+
             dp1 = p1 - p0
             dp2 = p2 - p0
             surf_area = dp1.cross(dp2).length * 0.5
             total_surf_area += surf_area
 
-            # Jacobian computation
+
             if abs(det_uv) < 1e-12:
                 jacobians.append(identity_j)
                 continue
@@ -257,8 +251,7 @@ def _aabb_identical(a, b):
 
 
 def _seg_cross(p, r, q, s):
-    # Strict interior only — endpoints excluded to avoid false positives
-    # where a vertex merely touches an adjacent edge.
+    # Strict interior only — endpoints excluded.
     rxs = r[0]*s[1] - r[1]*s[0]
     if abs(rxs) < 1e-12:
         return False
@@ -303,8 +296,7 @@ _SAT_SORT_MIN = 16  # proximity sort only pays off above this triangle count
 
 
 def _sat_overlap(island_a, island_b):
-    """SAT fallback — handles containment and parallel-edge cases that boundary
-    crossing misses. Proximity-sorted for early exit on large islands."""
+    """SAT fallback — handles containment and parallel-edge cases. Proximity-sorted for large islands."""
     tris_a = island_a.tris
     tris_b = island_b.tris
 
@@ -333,8 +325,7 @@ def _sat_overlap(island_a, island_b):
 
 
 def _islands_overlap_contour(a, b):
-    # Stage 1: boundary crossing — fast, handles most partial overlaps.
-    # Falls through to SAT for closed meshes with no boundary_segs.
+    # Stage 1: boundary crossing.
     if a.boundary_segs and b.boundary_segs:
         if _boundaries_intersect(a.boundary_segs, b.boundary_segs):
             return True
@@ -343,10 +334,7 @@ def _islands_overlap_contour(a, b):
 
 
 def find_tile_crossing_islands(islands):
-    """Return indices of islands whose AABB spans an integer UV tile boundary.
-
-    Islands flush with a tile edge (e.g. max_u == 1.0) are not flagged.
-    """
+    """Return indices of islands whose AABB spans an integer UV tile boundary."""
     crossing = set()
     for i, isle in enumerate(islands):
         mn_u, mn_v, mx_u, mx_v = isle.aabb
@@ -357,11 +345,7 @@ def find_tile_crossing_islands(islands):
 
 
 def _find_stacked(islands):
-    """Return (stacked_idx, stacked_pairs) for islands sharing identical UV positions.
-
-    stacked_idx: frozenset of all indices in at least one stacked pair.
-    stacked_pairs: set of exact (ia, ib) pairs.
-    """
+    """Return (stacked_idx, stacked_pairs) for islands with identical UV positions."""
     stacked = set()
     pairs   = set()
     n       = len(islands)
@@ -486,11 +470,7 @@ def _get_overlapping_pairs_cross(islands_a, islands_b):
 
 def _get_overlapping_pairs_cached(islands, stacked_idx, stacked_pairs,
                                    changed_keys, prev_pair_cache):
-    """Spatial grid cull -> overlap test, with per-pair result caching.
-
-    Only re-tests pairs where at least one island uv_key is in changed_keys.
-    Uses hash() for stable pair-key ordering across rebuilds (not id()).
-    """
+    """Spatial grid cull -> overlap test with per-pair result caching."""
     if not islands:
         return set(), {}
 
@@ -527,8 +507,7 @@ def _get_overlapping_pairs_cached(islands, stacked_idx, stacked_pairs,
                     continue
 
                 ka, kb = a.uv_key, b.uv_key
-                # Stable ordering by hash() — consistent across rebuilds
-                # because frozenset hash depends only on content, not address.
+                # Stable ordering by frozenset hash.
                 ck = (ka, kb) if hash(ka) <= hash(kb) else (kb, ka)
 
                 if (ka not in changed_keys and kb not in changed_keys
@@ -548,11 +527,7 @@ def _get_overlapping_pairs_cached(islands, stacked_idx, stacked_pairs,
 def _get_overlapping_pairs_cross_cached(islands_a, islands_b,
                                          changed_keys_a, changed_keys_b,
                                          prev_pair_cache):
-    """Cross-object overlap with per-pair caching.
-
-    Cache key is (ka, kb) — directional (A->B), no reordering needed.
-    Frozenset equality is by value so lookup is stable across rebuilds.
-    """
+    """Cross-object overlap with per-pair caching."""
     inter_a, inter_b = set(), set()
     stack_a, stack_b = set(), set()
     pairs    = []
@@ -595,7 +570,7 @@ def _get_overlapping_pairs_cross_cached(islands_a, islands_b,
                         continue
 
                     ka, kb = a.uv_key, b.uv_key
-                    ck = (ka, kb)   # directional: A->B always
+                    ck = (ka, kb)
 
                     if (ka not in changed_keys_a and kb not in changed_keys_b
                             and prev_pair_cache is not None
@@ -618,9 +593,7 @@ def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
     """Returns (inter_idx, stack_idx, uv_key_hash, inter_pairs,
                 island_keys, pair_cache).
 
-    island_keys: list of uv_key per island (for diffing next call).
-    pair_cache:  per-pair overlap results for selective re-test.
-    """
+    island_keys: list of uv_key per island; pair_cache: per-pair overlap results."""
     if not islands:
         return frozenset(), frozenset(), 0, frozenset(), [], {}
 
@@ -629,7 +602,7 @@ def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
         (i, k) for i, k in enumerate(cur_island_keys) if k is not None
     ))
 
-    # Full cache hit: nothing changed.
+
     if (prev_uv_key_hash == cur_uv_key_hash
             and prev_inter_idx is not None
             and prev_stack_idx is not None):
@@ -639,7 +612,7 @@ def classify_islands(islands, prev_inter_idx=None, prev_stack_idx=None,
                 prev_island_keys or cur_island_keys,
                 prev_pair_cache or {})
 
-    # Diff old vs new island keys to find what moved.
+
     if prev_island_keys is not None:
         prev_counts = _Counter(k for k in prev_island_keys if k is not None)
         cur_counts  = _Counter(k for k in cur_island_keys  if k is not None)
@@ -687,7 +660,7 @@ def classify_islands_cross(islands_a, islands_b,
         frozenset((i, k) for i, k in enumerate(cur_keys_b) if k is not None),
     ))
 
-    # Full cache hit.
+
     if prev_inter_a is not None and prev_uv_hash == cur_uv_hash:
         return (prev_inter_a, prev_inter_b,
                 prev_stack_a or frozenset(), prev_stack_b or frozenset(),
@@ -759,8 +732,7 @@ def generate_hatch(tris, gap=0.01, angle_deg=45):
                         t = (y - v1[1]) / denom
                         xs.append(v1[0] + t*(v2[0]-v1[0]))
         xs.sort()
-        # Odd x count means a scanline hit a shared vertex — merge near-equal
-        # clusters: odd-sized = local extremum (keep one); even-sized = discard.
+        # Odd x count: merge near-equal clusters.
         if len(xs) % 2 == 1:
             merged = []
             i = 0
@@ -788,11 +760,7 @@ def generate_cross_hatch(tris, gap=0.01, angle_deg=45):
 
 
 def normalize_island(isle):
-    """Return a copy of isle rigidly translated so its centroid sits in tile (0,0).
-
-    Rigid translation preserves triangle shapes. uv_key is recomputed with
-    per-vertex modulo so stacked detection works across tiles.
-    """
+    """Translate island so its centroid sits in tile (0,0). Recomputes uv_key with modulo."""
     if not isle.tris:
         norm               = Island([], isle.color, isle.object_name)
         norm.boundary_segs = []

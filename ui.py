@@ -107,7 +107,6 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
 
         layout.separator()
 
-        # Warn when selected objects have mismatched per-object texture settings.
         if props.show_stretch or props.show_padding:
             sel = [o for o in context.selected_objects if hasattr(o, 'uv_id_props')]
             if len(sel) > 1:
