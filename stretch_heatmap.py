@@ -91,14 +91,14 @@ def build_geometry_batch(obj_cache, props):
                         colors.append(heat_colors.get(key, stretch.COL_GRAY))
 
         if not coords:
-            return None
+            return False
 
         return batch_for_shader(shader, 'TRIS', {"pos": coords, "color": colors})
 
     except Exception as e:
         print(f"[UVO] stretch_heatmap build_geometry_batch error: {e}")
         traceback.print_exc()
-        return None
+        return False
 
 
 _draw_error_printed = False
@@ -123,10 +123,10 @@ def build_batch_from_precomputed(coords, colors):
     """Build GPU batch from pre-computed worker data (no math, just batch_for_shader)."""
     shader = _get_shader()
     if shader is None or not coords:
-        return None
+        return False
     try:
         return batch_for_shader(shader, 'TRIS', {"pos": coords, "color": colors})
     except Exception as e:
         print(f"[UVO] stretch_heatmap batch_from_precomputed error: {e}")
         traceback.print_exc()
-        return None
+        return False

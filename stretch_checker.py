@@ -152,7 +152,7 @@ def build_geometry_batch(obj_cache, props):
                     colors.append(heat_colors.get(key, stretch.COL_GRAY))
 
     if not coords:
-        return None
+        return False
 
     try:
         return batch_for_shader(shader, 'TRIS', {
@@ -199,7 +199,7 @@ def build_batch_from_precomputed(coords, warped_uvs, colors):
     """Build GPU batch from pre-computed worker data (no math, just batch_for_shader)."""
     shader = _get_shader()
     if shader is None or not coords:
-        return None
+        return False
     try:
         return batch_for_shader(shader, 'TRIS', {
             "pos": coords,

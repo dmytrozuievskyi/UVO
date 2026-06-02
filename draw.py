@@ -629,7 +629,7 @@ def _rebuild_hatch_from_cache(props):
         del _cross_hatch_seg_cache[dead]
 
     def _make(prim, coords, colors):
-        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else None
+        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else False
 
     _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
     _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
@@ -881,7 +881,7 @@ def _rebuild_intersect_opacity(props):
                 checker_colors.extend((checker_col, checker_col))
 
     def _make(prim, coords, colors):
-        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else None
+        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else False
 
     _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
     _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
