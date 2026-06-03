@@ -1,52 +1,33 @@
 # UVO — UV Overlays for Blender
 
-A Blender addon that adds a suite of dynamic, real-time overlays to the UV Editor, helping you catch UV problems before they reach your textures.
+UVO adds a suite of dynamic, real-time overlays to Blender's UV Editor to help you catch mapping issues before they reach your textures.
 
----
-
-## Overlays
+## Features
 
 ### ID Overlay
-Assigns a distinct, stable color to each UV island or mesh component so you can immediately see how your UVs are organized.
-
-- **Object mode** — one color per object
-- **Island mode** — one color per topologically connected UV island
-- Adjustable opacity
-
----
+Color-codes your UVs so you can immediately see how they are organized.
+- **Object & Island Modes** — Assigns a distinct color per object, or per topologically connected UV island.
 
 ### Intersect Overlay
 Highlights overlapping and stacked UV islands in real-time.
-
-- Detects overlaps **within** a single object and **across** all objects in Edit Mode simultaneously
-- **Tiled mode** — folds all UV tiles into (0,1) before detection, finding overlaps between islands in different tiles that share the same texel space. Use for tiling or repeating textures
-- **UDIM mode** — each tile is treated independently. Use when each tile bakes to a separate texture
-- Hatching on intersecting islands, cross-hatching on perfectly stacked islands, red fill on the overlapping area
-- Adjustable opacity
-
----
+- Detects overlaps **within** a single object and **across** all objects in Edit Mode simultaneously.
+- **Tiled mode** — Folds all UV tiles into (0,1) before detection, finding overlaps between islands in different tiles that share the same texel space.
+- **UDIM mode** — Each tile is treated independently.
+- Hatching on intersecting islands, cross-hatching on perfectly stacked islands, and red fill on the overlapping area.
 
 ### Padding Overlay
-Visualizes the padding zone around each island and flags islands whose zones overlap, indicating potential mipmap bleed.
-
-- Set texture resolution (256 – 8192, width and height independently)
-- Set padding size in pixels (2 – 32)
-- Green outline = safe, red outline = padding violation
-- Aspect-corrected display for non-square textures
-
----
+Visualizes the padding zone around each island and flags potential mipmap bleed.
 
 ### Stretch Overlay
 Visualizes texel density deviation from a target value using a warped checker grid and color heatmap.
+- **Checker** — Grid deforms to show UV distortion; uniform squares = no stretch.
+- **Heatmap** — Blue (compressed) → gray (uniform) → red (stretched) gradient.
+- **Both** — Checker grid with heatmap colors blended into each cell, combining distortion shape and density feedback in a single view.
 
-- **Checker** — grid deforms to show UV distortion; uniform squares = no stretch
-- **Heatmap** — blue (compressed) → gray (uniform) → red (stretched) gradient
-- **Both** — checker grid with heatmap colors blended into each cell, combining distortion shape and density feedback in a single view
-- Per-object texture resolution and texel density settings
-- Eyedropper tool to sample density from selected UV islands
-- Correct visualization for non-square textures
-
----
+### Additional Features
+- Per-object texture resolution and texel density settings.
+- Eyedropper tool to sample density from selected UV islands.
+- Correct visualization for non-square textures.
 
 ## Installation
 
@@ -54,8 +35,6 @@ Visualizes texel density deviation from a target value using a warped checker gr
 2. In Blender, go to **Edit → Preferences → Add-ons → Install from Disk**
 3. Select the downloaded `.zip`
 4. Enable **UVO - UV Overlays** in the addon list
-
----
 
 ## Usage
 
@@ -65,15 +44,9 @@ Visualizes texel density deviation from a target value using a warped checker gr
 4. Click the **UVO button** in the tool header (right side) to open the overlay panel
 5. Enable any combination of ID, Intersect, Padding, and Stretch overlays
 
-**Live Update** — when enabled, overlays refresh on every UV change. Disable for smoother editing on complex meshes; overlays will update once after each action completes.
-
----
-
 ## Compatibility
 
 Requires Blender 4.2 or newer.
-
----
 
 ## License
 
