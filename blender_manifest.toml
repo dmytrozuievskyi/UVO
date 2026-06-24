@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "uvo_overlays"
-version = "1.2.2"
+version = "1.2.3"
 
 name = "UVO"
 tagline = "Dynamic overlays for the UV Editor"
@@ -27,5 +27,6 @@ website = "https://github.com/dmytrozuievskyi/UVO"
     "/*.tmp",
     "/*.bat",
     "/*.zip",
+    "/*LICENSE",
     "images/"
  ]
