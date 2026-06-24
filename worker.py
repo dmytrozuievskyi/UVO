@@ -14,7 +14,6 @@ import os
 import struct
 import pickle
 import math
-import threading
 import time
 import traceback
 
@@ -25,7 +24,6 @@ sys.stdout = sys.stderr
 JOB_TIMEOUT_SECS = 10.0
 
 _LOG_PATH = None
-_log_lock = threading.Lock()
 DEBUG_MODE = False
 
 
@@ -35,12 +33,11 @@ def _wlog(msg):
         
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}\n"
-    with _log_lock:
-        try:
-            with open(_LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(line)
-        except Exception:
-            pass
+    try:
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 
 
@@ -355,9 +352,6 @@ def main():
         sys.exit("Usage: worker.py <addon_dir>")
 
     addon_dir = sys.argv[1]
-    if addon_dir not in sys.path:
-        sys.path.insert(0, addon_dir)
-
 
     global DEBUG_MODE, _LOG_PATH
     if "--debug" in sys.argv:
@@ -375,14 +369,25 @@ def main():
 
     _wlog(f"addon_dir={addon_dir}")
 
+    import importlib.util
+    def _import_local(module_name):
+        path = os.path.join(addon_dir, f"{module_name}.py")
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    try:
+        utils_mod = _import_local("utils")
+        _wlog("utils imported OK")
+    except Exception as e:
+        _wlog(f"utils import FAILED: {e}")
+
     _ix_err = None
     try:
-        import intersect as ix
+        ix = _import_local("intersect")
         _wlog("intersect imported OK")
-    except ImportError as e:
-        ix      = None
-        _ix_err = str(e)
-        _wlog(f"intersect import FAILED: {e}")
     except Exception as e:
         ix      = None
         _ix_err = f"Unexpected error: {e}"
@@ -391,12 +396,8 @@ def main():
     _stretch_err = None
     try:
         global stretch
-        import stretch
+        stretch = _import_local("stretch")
         _wlog("stretch imported OK")
-    except ImportError as e:
-        stretch      = None
-        _stretch_err = str(e)
-        _wlog(f"stretch import FAILED: {e}")
     except Exception as e:
         stretch      = None
         _stretch_err = f"Unexpected error: {e}"
@@ -414,47 +415,34 @@ def main():
         job_type = job.get('type', '?')
         _wlog(f"received job id={job_id} type={job_type!r}")
 
-        # Hard timeout — hung job exits so __init__.py can restart
-        result_box = [None]
-        error_box  = [None]
+        # Process synchronously without threading timeout.
+        # The main Blender process can kill the worker if it hangs.
+        result = None
+        error = None
+        
+        try:
+            if ix is None:
+                error = {'id': job_id, 'type': 'error', 'msg': f'intersect import failed: {_ix_err}'}
+            elif stretch is None:
+                error = {'id': job_id, 'type': 'error', 'msg': f'stretch import failed: {_stretch_err}'}
+            else:
+                result = _process_job(job, ix)
+        except Exception as e:
+            err_msg = str(e)
+            tb = traceback.format_exc()
+            error = {'id': job_id, 'type': 'error', 'msg': err_msg, 'tb': tb}
 
-        def _run():
+        if error:
+            _wlog(f"job {job_id} ERROR: {error['msg']}")
             try:
-                if ix is None:
-                    result_box[0] = {'id': job_id, 'type': 'error',
-                                     'msg': f'intersect import failed: {_ix_err}'}
-                elif stretch is None:
-                    result_box[0] = {'id': job_id, 'type': 'error',
-                                     'msg': f'stretch import failed: {_stretch_err}'}
-                else:
-                    result_box[0] = _process_job(job, ix)
-            except Exception as e:
-                error_box[0] = (str(e), traceback.format_exc())
-
-        t       = threading.Thread(target=_run, daemon=True)
-        t_start = time.perf_counter()
-        t.start()
-        t.join(timeout=JOB_TIMEOUT_SECS)
-
-        if t.is_alive():
-            elapsed = time.perf_counter() - t_start
-            msg = (f"TIMEOUT: job id={job_id} type={job_type!r} "
-                   f"hung {elapsed:.1f}s — worker exiting for restart")
-            _wlog(f"*** {msg} ***")
-            try:
-                _write_result(ipc_out, {'id': job_id, 'type': 'error', 'msg': msg})
+                _write_result(ipc_out, error)
             except Exception:
                 pass
-            sys.exit(1)   # triggers restart in __init__.send_job
-
-        if error_box[0]:
-            err_msg, tb = error_box[0]
-            _wlog(f"job {job_id} ERROR: {err_msg}")
-            _write_result(ipc_out, {
-                'id': job_id, 'type': 'error', 'msg': err_msg, 'tb': tb
-            })
-        else:
-            _write_result(ipc_out, result_box[0])
+        elif result:
+            try:
+                _write_result(ipc_out, result)
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':

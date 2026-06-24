@@ -1,20 +1,17 @@
 import importlib
 import os
-import queue as _queue_mod
 import struct
 import pickle
 import subprocess
 import sys
-import threading
 
 # Background worker (Popen + length-prefixed pickle over stdin/stdout).
 # Avoids multiprocessing module-name-resolution issues in Blender extensions.
+# Non-blocking IPC via platform-specific pipe peek — no threading required.
 
 _worker_process  = None    # subprocess.Popen
-_worker_lock     = threading.Lock()
 _next_job_id     = 0
-_result_queue    = None   # fresh Queue per start_worker()
-_reader_thread   = None   # background thread reading worker stdout
+_ipc_buffer      = bytearray()
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
 
 
@@ -62,82 +59,96 @@ def send_job(job):
         start_worker()
         return False
     try:
-        with _worker_lock:
-            _write_job(proc, job)
+        _write_job(proc, job)
         return True
     except Exception as e:
         print(f"[UVO] Worker send error: {e}")
         return False
 
 
-def read_result_blocking(timeout=5.0):
-    """Read one result from the result queue (blocking, for ping test)."""
-    if _result_queue is None:
-        raise TimeoutError("Worker not started")
-    try:
-        return _result_queue.get(timeout=timeout)
-    except _queue_mod.Empty:
-        raise TimeoutError("Worker result timeout")
+def _read_pipe_nonblocking(stream):
+    """Read available bytes from a pipe without blocking. Returns b'' if nothing ready."""
+    if sys.platform == 'win32':
+        import msvcrt, ctypes
+        from ctypes import wintypes
+        try:
+            handle = msvcrt.get_osfhandle(stream.fileno())
+            avail = wintypes.DWORD(0)
+            ok = ctypes.windll.kernel32.PeekNamedPipe(
+                handle, None, 0, None, ctypes.byref(avail), None
+            )
+            if not ok or avail.value == 0:
+                return b''
+            return os.read(stream.fileno(), avail.value)
+        except Exception:
+            return b''
+    else:
+        import fcntl
+        try:
+            fd = stream.fileno()
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            try:
+                return os.read(fd, 65536)
+            except BlockingIOError:
+                return b''
+            finally:
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+        except Exception:
+            return b''
 
 
-
-def get_result_queue():
-    """Return the queue where worker results arrive. None if worker not started."""
-    return _result_queue
-
-
-def _start_reader_thread():
-    """Spawn a daemon thread that reads worker stdout and puts results in _result_queue."""
-    global _reader_thread
-
+def get_worker_results():
+    """Read all available results from the non-blocking worker pipe."""
+    global _ipc_buffer
     proc = _worker_process
-    if proc is None:
-        return
+    if proc is None or proc.poll() is not None:
+        return []
 
-    def _reader():
-        while True:
-            try:
-                header = proc.stdout.read(4)
-                if len(header) < 4:
-                    break
-                size = struct.unpack('>I', header)[0]
-                data = proc.stdout.read(size)
-                if len(data) < size:
-                    break
-                result = pickle.loads(data)
-                _result_queue.put(result)
-            except Exception:
-                break
+    # Read stderr non-blocking
+    while True:
+        err_chunk = _read_pipe_nonblocking(proc.stderr)
+        if not err_chunk:
+            break
+        sys.stdout.write(err_chunk.decode('utf-8', errors='replace'))
 
-    _reader_thread = threading.Thread(target=_reader, daemon=True, name='UVO_Reader')
-    _reader_thread.start()
+    # Read stdout non-blocking
+    while True:
+        chunk = _read_pipe_nonblocking(proc.stdout)
+        if not chunk:
+            break
+        _ipc_buffer.extend(chunk)
 
-
-def _start_stderr_reader(proc):
-    """Spawn a daemon thread to read worker stderr and print it to the Blender console."""
-    def _reader_stderr():
-        for line in iter(proc.stderr.readline, b''):
-            try:
-                msg = line.decode('utf-8').rstrip()
-                if msg:
-                    print(msg)
-            except Exception:
-                pass
-
-    t = threading.Thread(target=_reader_stderr, daemon=True, name='UVO_Worker_Stderr')
-    t.start()
+    results = []
+    # Parse buffer
+    while True:
+        if len(_ipc_buffer) < 4:
+            break
+        size = struct.unpack('>I', _ipc_buffer[:4])[0]
+        if len(_ipc_buffer) < 4 + size:
+            break
+        
+        data = _ipc_buffer[4:4+size]
+        try:
+            result = pickle.loads(data)
+            results.append(result)
+        except Exception as e:
+            print(f"[UVO] Worker IPC unpickle error: {e}")
+            
+        del _ipc_buffer[:4+size]
+        
+    return results
 
 
 def start_worker():
     """Spawn the background worker subprocess. Safe to call multiple times."""
-    global _worker_process, _result_queue
+    global _worker_process, _ipc_buffer
 
     if _worker_process is not None and _worker_process.poll() is None:
         return   # already alive
 
     clear_synced_objects()
-
-    _result_queue = _queue_mod.Queue()
+    _ipc_buffer.clear()
 
     addon_dir  = os.path.dirname(os.path.abspath(__file__))
     worker_script = os.path.join(addon_dir, "worker.py")
@@ -146,8 +157,7 @@ def start_worker():
         print(f"[UVO] worker.py not found at {worker_script}")
         return
 
-    python_exe = sys.executable
-    cmd = [python_exe, worker_script, addon_dir]
+    cmd = [sys.executable] + list(bpy.app.python_args) + [worker_script, addon_dir]
     
     if utils._debug_enabled():
         cmd.append("--debug")
@@ -160,8 +170,6 @@ def start_worker():
             stderr = subprocess.PIPE,
         )
         print(f"[UVO] Worker process started (pid={_worker_process.pid})")
-        _start_reader_thread()
-        _start_stderr_reader(_worker_process)
     except Exception as e:
         print(f"[UVO] Failed to start worker: {e}")
         _worker_process = None
@@ -283,7 +291,6 @@ def register():
     ops.register()
     draw.register()
     ui.register()
-    start_worker()
 
 
 def unregister():

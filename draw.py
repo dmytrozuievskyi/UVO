@@ -325,6 +325,9 @@ def _dispatch_worker_job(props):
     if pkg is None:
         return False
 
+    if pkg.get_worker_process() is None or pkg.get_worker_process().poll() is not None:
+        pkg.start_worker()
+
     do_classify = props.show_intersect and not props.is_muted
     do_stretch  = props.show_stretch  and not props.is_muted
 
@@ -379,18 +382,18 @@ def _start_result_poller():
             _result_timer_fn = None
             return None
 
-        rq = pkg.get_result_queue()
-        if rq is None:
+        proc = pkg.get_worker_process()
+        if proc is None or proc.poll() is not None:
+            _classify_job_id = 0
+            _stretch_job_id = 0
             _result_timer_fn = None
+            _tag_redraw()
             return None
 
-        # Drain all available results in one tick.
-        got_any = False
-        while True:
-            try:
-                result = rq.get_nowait()
-            except Exception:
-                break  # queue empty
+        results = pkg.get_worker_results()
+        got_any = len(results) > 0
+
+        for result in results:
 
             got_any = True
             rtype = result.get('type')
@@ -398,6 +401,8 @@ def _start_result_poller():
 
             if rtype == 'error':
                 utils.log("async", f"worker error: {result.get('msg')}")
+                if rid == _classify_job_id: _classify_job_id = 0
+                if rid == _stretch_job_id: _stretch_job_id = 0
             elif rtype == 'compute_result':
                 is_latest = False
                 if rid == _classify_job_id:
