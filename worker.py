@@ -17,9 +17,16 @@ import math
 import time
 import traceback
 
+from . import intersect as ix
+from . import stretch
+
 # Redirect stdout to stderr so print() doesn't corrupt the IPC pipe.
-ipc_out = sys.stdout.buffer
-sys.stdout = sys.stderr
+ipc_out = None
+
+def _init_ipc():
+    global ipc_out
+    ipc_out = sys.stdout.buffer
+    sys.stdout = sys.stderr
 
 JOB_TIMEOUT_SECS = 10.0
 
@@ -347,14 +354,12 @@ def _stretch_compute_island(isle, tex_w, tex_h, target_texel):
 
 
 
-def main():
-    if len(sys.argv) < 2:
-        sys.exit("Usage: worker.py <addon_dir>")
-
-    addon_dir = sys.argv[1]
+def main_loop(argv):
+    """Entry point called by the registered CLI command."""
+    _init_ipc()
 
     global DEBUG_MODE, _LOG_PATH
-    if "--debug" in sys.argv:
+    if "--uvo-debug" in argv:
         DEBUG_MODE = True
         pid = os.getpid()
         _LOG_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), f"uvo_worker_{pid}.log")
@@ -367,42 +372,8 @@ def main():
         except Exception:
             pass
 
-    _wlog(f"addon_dir={addon_dir}")
-
-    import importlib.util
-    def _import_local(module_name):
-        path = os.path.join(addon_dir, f"{module_name}.py")
-        spec = importlib.util.spec_from_file_location(module_name, path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-        return module
-
-    try:
-        utils_mod = _import_local("utils")
-        _wlog("utils imported OK")
-    except Exception as e:
-        _wlog(f"utils import FAILED: {e}")
-
-    _ix_err = None
-    try:
-        ix = _import_local("intersect")
-        _wlog("intersect imported OK")
-    except Exception as e:
-        ix      = None
-        _ix_err = f"Unexpected error: {e}"
-        _wlog(f"intersect import FAILED (unexpected): {e}")
-
-    _stretch_err = None
-    try:
-        global stretch
-        stretch = _import_local("stretch")
-        _wlog("stretch imported OK")
-    except Exception as e:
-        stretch      = None
-        _stretch_err = f"Unexpected error: {e}"
-        _wlog(f"stretch import FAILED (unexpected): {e}")
-
+    _wlog("worker starting — importing addon modules")
+    _wlog("entering job loop")
     stdin = sys.stdin.buffer
 
     while True:
@@ -417,33 +388,17 @@ def main():
 
         # Process synchronously without threading timeout.
         # The main Blender process can kill the worker if it hangs.
-        result = None
-        error = None
-        
         try:
-            if ix is None:
-                error = {'id': job_id, 'type': 'error', 'msg': f'intersect import failed: {_ix_err}'}
-            elif stretch is None:
-                error = {'id': job_id, 'type': 'error', 'msg': f'stretch import failed: {_stretch_err}'}
-            else:
-                result = _process_job(job, ix)
+            result = _process_job(job, ix)
         except Exception as e:
             err_msg = str(e)
             tb = traceback.format_exc()
-            error = {'id': job_id, 'type': 'error', 'msg': err_msg, 'tb': tb}
+            result = {'id': job_id, 'type': 'error', 'msg': err_msg, 'tb': tb}
 
-        if error:
-            _wlog(f"job {job_id} ERROR: {error['msg']}")
-            try:
-                _write_result(ipc_out, error)
-            except Exception:
-                pass
-        elif result:
+        if result:
             try:
                 _write_result(ipc_out, result)
             except Exception:
                 pass
 
-
-if __name__ == '__main__':
-    main()
+    return 0

@@ -5,14 +5,14 @@ import pickle
 import subprocess
 import sys
 
-# Background worker (Popen + length-prefixed pickle over stdin/stdout).
-# Avoids multiprocessing module-name-resolution issues in Blender extensions.
-# Non-blocking IPC via platform-specific pipe peek — no threading required.
+# Background worker launched via Blender's CLI command mechanism
 
 _worker_process  = None    # subprocess.Popen
 _next_job_id     = 0
 _ipc_buffer      = bytearray()
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
+
+_cli_commands = []   # handles returned by bpy.utils.register_cli_command
 
 
 def get_synced_hash(name):
@@ -67,7 +67,7 @@ def send_job(job):
 
 
 def _read_pipe_nonblocking(stream):
-    """Read available bytes from a pipe without blocking. Returns b'' if nothing ready."""
+    """Read whatever bytes are available right now without blocking."""
     if sys.platform == 'win32':
         import msvcrt, ctypes
         from ctypes import wintypes
@@ -85,7 +85,7 @@ def _read_pipe_nonblocking(stream):
     else:
         import fcntl
         try:
-            fd = stream.fileno()
+            fd    = stream.fileno()
             flags = fcntl.fcntl(fd, fcntl.F_GETFL)
             fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
             try:
@@ -99,49 +99,44 @@ def _read_pipe_nonblocking(stream):
 
 
 def get_worker_results():
-    """Read all available results from the non-blocking worker pipe."""
+    """Collect all complete result frames currently available. Never blocks."""
     global _ipc_buffer
     proc = _worker_process
     if proc is None or proc.poll() is not None:
         return []
 
-    # Read stderr non-blocking
+    # Drain stderr so worker log lines appear in the Blender console.
     while True:
-        err_chunk = _read_pipe_nonblocking(proc.stderr)
-        if not err_chunk:
+        chunk = _read_pipe_nonblocking(proc.stderr)
+        if not chunk:
             break
-        sys.stdout.write(err_chunk.decode('utf-8', errors='replace'))
+        sys.stdout.write(chunk.decode('utf-8', errors='replace'))
 
-    # Read stdout non-blocking
+    # Drain stdout into the reassembly buffer.
     while True:
         chunk = _read_pipe_nonblocking(proc.stdout)
         if not chunk:
             break
         _ipc_buffer.extend(chunk)
 
+    # Parse complete length-prefixed frames.
     results = []
-    # Parse buffer
-    while True:
-        if len(_ipc_buffer) < 4:
-            break
+    while len(_ipc_buffer) >= 4:
         size = struct.unpack('>I', _ipc_buffer[:4])[0]
         if len(_ipc_buffer) < 4 + size:
             break
-        
-        data = _ipc_buffer[4:4+size]
+        frame = _ipc_buffer[4:4 + size]
+        del _ipc_buffer[:4 + size]
         try:
-            result = pickle.loads(data)
-            results.append(result)
+            results.append(pickle.loads(frame))
         except Exception as e:
             print(f"[UVO] Worker IPC unpickle error: {e}")
-            
-        del _ipc_buffer[:4+size]
-        
+
     return results
 
 
 def start_worker():
-    """Spawn the background worker subprocess. Safe to call multiple times."""
+    """Spawn the background Blender worker process."""
     global _worker_process, _ipc_buffer
 
     if _worker_process is not None and _worker_process.poll() is None:
@@ -150,17 +145,11 @@ def start_worker():
     clear_synced_objects()
     _ipc_buffer.clear()
 
-    addon_dir  = os.path.dirname(os.path.abspath(__file__))
-    worker_script = os.path.join(addon_dir, "worker.py")
+    # Launch Blender in background mode and run registered CLI command.
+    cmd = [bpy.app.binary_path, '--background', '--command', 'uvo_worker']
 
-    if not os.path.exists(worker_script):
-        print(f"[UVO] worker.py not found at {worker_script}")
-        return
-
-    cmd = [sys.executable] + list(bpy.app.python_args) + [worker_script, addon_dir]
-    
     if utils._debug_enabled():
-        cmd.append("--debug")
+        cmd.append('--uvo-debug')
 
     try:
         _worker_process = subprocess.Popen(
@@ -176,7 +165,7 @@ def start_worker():
 
 
 def stop_worker():
-    """Close the worker's stdin (signals EOF) and wait for it to exit."""
+    """Signal EOF to the worker and wait for it to exit cleanly."""
     global _worker_process
 
     proc = _worker_process
@@ -192,15 +181,23 @@ def stop_worker():
         proc.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
         proc.terminate()
-        proc.wait(timeout=1.0)
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
 
     print("[UVO] Worker process stopped")
     _worker_process = None
 
 
+def _uvo_worker_command(argv):
+    """Called when Blender runs: blender --background --command uvo_worker"""
+    from . import worker
+    return worker.main_loop(argv)
+
+
 if "bpy" in locals():
     importlib.reload(utils)
-    importlib.reload(worker)
     importlib.reload(offscreen)
     importlib.reload(intersect)
     importlib.reload(padding)
@@ -213,7 +210,6 @@ if "bpy" in locals():
     importlib.reload(ui)
 else:
     from . import utils
-    from . import worker
     from . import offscreen
     from . import intersect
     from . import padding
@@ -262,6 +258,11 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
 
 def register():
     bpy.utils.register_class(UVOAddonPreferences)
+
+    _cli_commands.append(
+        bpy.utils.register_cli_command("uvo_worker", _uvo_worker_command)
+    )
+
     # Load icons before UI registers.
     pcoll = bpy.utils.previews.new()
     try:
@@ -272,15 +273,16 @@ def register():
             name = f"clock_frame_{i:02d}"
             pcoll.load(name, os.path.join(icons_dir, f"{name}.png"), 'IMAGE')
         
-        # Force decode to prevent lazy-load spinner on first toggle.
-        _ = pcoll["uv_overlay_on"].icon_id
-        _ = pcoll["uv_overlay_on"].image_size
-        _ = pcoll["uv_overlay_off"].icon_id
-        _ = pcoll["uv_overlay_off"].image_size
-        for i in range(12):
-            icon = pcoll[f"clock_frame_{i:02d}"]
-            _ = icon.icon_id
-            _ = icon.image_size
+        if not bpy.app.background:
+            # Force decode to prevent lazy-load spinner on first toggle.
+            _ = pcoll["uv_overlay_on"].icon_id
+            _ = pcoll["uv_overlay_on"].image_size
+            _ = pcoll["uv_overlay_off"].icon_id
+            _ = pcoll["uv_overlay_off"].image_size
+            for i in range(12):
+                icon = pcoll[f"clock_frame_{i:02d}"]
+                _ = icon.icon_id
+                _ = icon.image_size
             
         preview_collections["main"] = pcoll
     except Exception as e:
@@ -295,6 +297,11 @@ def register():
 
 def unregister():
     stop_worker()
+
+    for cmd in _cli_commands:
+        bpy.utils.unregister_cli_command(cmd)
+    _cli_commands.clear()
+
     ui.unregister()
     draw.unregister()
     ops.unregister()
