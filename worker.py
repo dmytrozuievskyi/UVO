@@ -1,7 +1,7 @@
 """
 Background worker process for UVO overlay computation.
 
-Run as standalone script: python worker.py <addon_dir>
+Run as background Blender process: blender --background --command uvo_worker
 Communication: stdin/stdout with length-prefixed pickle frames.
 
 Job types:
@@ -27,8 +27,6 @@ def _init_ipc():
     global ipc_out
     ipc_out = sys.stdout.buffer
     sys.stdout = sys.stderr
-
-JOB_TIMEOUT_SECS = 10.0
 
 _LOG_PATH = None
 DEBUG_MODE = False
@@ -357,6 +355,14 @@ def _stretch_compute_island(isle, tex_w, tex_h, target_texel):
 def main_loop(argv):
     """Entry point called by the registered CLI command."""
     _init_ipc()
+    
+    # Send handshake so parent knows the pipe is now free
+    if ipc_out:
+        try:
+            ipc_out.write(b'UVO_SYNC')
+            ipc_out.flush()
+        except Exception:
+            pass
 
     global DEBUG_MODE, _LOG_PATH
     if "--uvo-debug" in argv:
@@ -388,14 +394,23 @@ def main_loop(argv):
 
         # Process synchronously without threading timeout.
         # The main Blender process can kill the worker if it hangs.
+        result = None
+        error = None
+
         try:
             result = _process_job(job, ix)
         except Exception as e:
             err_msg = str(e)
             tb = traceback.format_exc()
-            result = {'id': job_id, 'type': 'error', 'msg': err_msg, 'tb': tb}
+            error = {'id': job_id, 'type': 'error', 'msg': err_msg, 'tb': tb}
 
-        if result:
+        if error:
+            _wlog(f"job {job_id} ERROR: {error['msg']}")
+            try:
+                _write_result(ipc_out, error)
+            except Exception:
+                pass
+        elif result:
             try:
                 _write_result(ipc_out, result)
             except Exception:

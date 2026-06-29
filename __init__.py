@@ -11,6 +11,7 @@ _worker_process  = None    # subprocess.Popen
 _next_job_id     = 0
 _ipc_buffer      = bytearray()
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
+_ipc_synced      = False
 
 _cli_commands = []   # handles returned by bpy.utils.register_cli_command
 
@@ -100,7 +101,7 @@ def _read_pipe_nonblocking(stream):
 
 def get_worker_results():
     """Collect all complete result frames currently available. Never blocks."""
-    global _ipc_buffer
+    global _ipc_buffer, _ipc_synced
     proc = _worker_process
     if proc is None or proc.poll() is not None:
         return []
@@ -118,6 +119,16 @@ def get_worker_results():
         if not chunk:
             break
         _ipc_buffer.extend(chunk)
+
+    # If not synced yet, scan for the handshake
+    if not _ipc_synced:
+        sync_idx = _ipc_buffer.find(b'UVO_SYNC')
+        if sync_idx == -1:
+            if len(_ipc_buffer) > 7:
+                del _ipc_buffer[:-7]
+            return []
+        del _ipc_buffer[:sync_idx + 8]
+        _ipc_synced = True
 
     # Parse complete length-prefixed frames.
     results = []
@@ -137,13 +148,14 @@ def get_worker_results():
 
 def start_worker():
     """Spawn the background Blender worker process."""
-    global _worker_process, _ipc_buffer
+    global _worker_process, _ipc_buffer, _ipc_synced
 
     if _worker_process is not None and _worker_process.poll() is None:
         return   # already alive
 
     clear_synced_objects()
     _ipc_buffer.clear()
+    _ipc_synced = False
 
     # Launch Blender in background mode and run registered CLI command.
     cmd = [bpy.app.binary_path, '--background', '--command', 'uvo_worker']
