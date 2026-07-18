@@ -12,6 +12,7 @@ _next_job_id     = 0
 _ipc_buffer      = bytearray()
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
 _ipc_synced      = False
+_pending_job     = None
 
 _cli_commands = []   # handles returned by bpy.utils.register_cli_command
 
@@ -52,6 +53,7 @@ def next_job_id():
 
 def send_job(job):
     """Send a job to the worker. Returns False if worker not running."""
+    global _pending_job
     proc = _worker_process
     if proc is None or proc.poll() is not None:
         # Worker is dead — restart it for the next call, bail for this one.
@@ -59,6 +61,12 @@ def send_job(job):
             print(f"[UVO] Worker died (exit={proc.poll()}) — restarting")
         start_worker()
         return False
+        
+    if not _ipc_synced:
+        _pending_job = job
+        print("[UVO] Worker starting — job queued for delivery after handshake")
+        return True
+
     try:
         _write_job(proc, job)
         return True
@@ -101,7 +109,7 @@ def _read_pipe_nonblocking(stream):
 
 def get_worker_results():
     """Collect all complete result frames currently available. Never blocks."""
-    global _ipc_buffer, _ipc_synced
+    global _ipc_buffer, _ipc_synced, _pending_job
     proc = _worker_process
     if proc is None or proc.poll() is not None:
         return []
@@ -129,6 +137,14 @@ def get_worker_results():
             return []
         del _ipc_buffer[:sync_idx + 8]
         _ipc_synced = True
+        
+        if _pending_job is not None:
+            try:
+                _write_job(proc, _pending_job)
+                print("[UVO] Queued job delivered after handshake")
+            except Exception as e:
+                print(f"[UVO] Failed to deliver queued job: {e}")
+            _pending_job = None
 
     # Parse complete length-prefixed frames.
     results = []
@@ -148,7 +164,7 @@ def get_worker_results():
 
 def start_worker():
     """Spawn the background Blender worker process."""
-    global _worker_process, _ipc_buffer, _ipc_synced
+    global _worker_process, _ipc_buffer, _ipc_synced, _pending_job
 
     if _worker_process is not None and _worker_process.poll() is None:
         return   # already alive
@@ -156,6 +172,7 @@ def start_worker():
     clear_synced_objects()
     _ipc_buffer.clear()
     _ipc_synced = False
+    _pending_job = None
 
     # Launch Blender in background mode and run registered CLI command.
     cmd = [bpy.app.binary_path, '--background', '--command', 'uvo_worker']
@@ -163,13 +180,16 @@ def start_worker():
     if utils._debug_enabled():
         cmd.append('--uvo-debug')
 
+    kwargs = dict(
+        stdin  = subprocess.PIPE,
+        stdout = subprocess.PIPE,
+        stderr = subprocess.PIPE,
+    )
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW | 0x00000200
+
     try:
-        _worker_process = subprocess.Popen(
-            cmd,
-            stdin  = subprocess.PIPE,
-            stdout = subprocess.PIPE,
-            stderr = subprocess.PIPE,
-        )
+        _worker_process = subprocess.Popen(cmd, **kwargs)
         print(f"[UVO] Worker process started (pid={_worker_process.pid})")
     except Exception as e:
         print(f"[UVO] Failed to start worker: {e}")

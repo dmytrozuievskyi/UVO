@@ -44,8 +44,9 @@ _job_start_times   = {}
 
 _PREPASS_FAILED = object()  # sentinel: pre-pass failed, use n=1 fallback
 
-_DEBOUNCE_DELAY = 0.5
+_DEBOUNCE_DELAY = 0.25
 _debounce_fn    = None
+_pending_dispatch = False
 
 
 def _schedule_debounce():
@@ -433,6 +434,12 @@ def _start_result_poller():
             return 0.05
 
         _result_timer_fn = None
+        
+        global _pending_dispatch
+        if _pending_dispatch:
+            _pending_dispatch = False
+            _schedule_debounce()
+            
         return None
 
     _result_timer_fn = _poll
@@ -982,6 +989,8 @@ def update_batches_safe(context):
             # Skip if worker already busy; poller will trigger redraw on completion.
             if _result_timer_fn is not None:
                 utils.log("async", "skipping dispatch — worker already busy")
+                global _pending_dispatch
+                _pending_dispatch = True
             elif not _dispatch_worker_job(props):
                 # Sync fallback
                 if needs_classify:
@@ -1158,13 +1167,14 @@ def unregister():
     padding.clear()
     stretch.clear()
 
-    _obj_cache.clear()
-    _isect_self_cache.clear()
-    _isect_cross_cache.clear()
-    _hatch_seg_cache.clear()
-    _cross_hatch_seg_cache.clear()
-    _intersect_batches['hatch']   = None
-    _intersect_batches['checker'] = None
+    if _obj_cache is not None: _obj_cache.clear()
+    if _isect_self_cache is not None: _isect_self_cache.clear()
+    if _isect_cross_cache is not None: _isect_cross_cache.clear()
+    if _hatch_seg_cache is not None: _hatch_seg_cache.clear()
+    if _cross_hatch_seg_cache is not None: _cross_hatch_seg_cache.clear()
+    if _intersect_batches is not None:
+        _intersect_batches['hatch']   = None
+        _intersect_batches['checker'] = None
     _inter_island_tris = []
     _inter_gray        = 0.5
     _inter_threshold   = 0.6
