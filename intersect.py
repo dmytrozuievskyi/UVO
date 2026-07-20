@@ -1,3 +1,4 @@
+import time
 import math
 from collections import Counter as _Counter
 
@@ -94,8 +95,11 @@ def _extract_boundary_segs(island_faces, face_index_set, uv_layer, uv_adj):
 
 def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
                     object_name='', matrix_world=None):
+    t0 = time.perf_counter()
     bm_copy.faces.ensure_lookup_table()
     uv_adj = _build_uv_adjacency(bm_copy, uv_layer)
+    t1 = time.perf_counter()
+    utils_mod.log("timing_extract", f"build_uv_adj: {(t1-t0)*1000:.1f}ms")
 
     # Flood-fill to get total island count before colouring.
     face_groups = []
@@ -121,28 +125,46 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
         face_groups.append(face_index_set)
 
     total = len(face_groups)
-
+    t2 = time.perf_counter()
+    utils_mod.log("timing_extract", f"flood_fill: {(t2-t1)*1000:.1f}ms")
 
     islands = []
+    t_fan = 0.0
+    t_key = 0.0
+    t_bound = 0.0
+
     for idx, face_index_set in enumerate(face_groups):
         col = utils_mod.get_distinct_color(
             idx, total, seed_offset=obj_seed, alpha=alpha_val
         )
 
         island_faces = [bm_copy.faces[i] for i in face_index_set]
+        
+        ta = time.perf_counter()
         tris, jacobians, uv_area, surf_area = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
+        tb = time.perf_counter()
+        t_fan += (tb - ta)
 
         if tris:
             isle               = Island(tris, col, object_name)
             isle.jacobians     = jacobians
             isle.uv_area       = uv_area
             isle.surface_area  = surf_area
+            
+            tc = time.perf_counter()
             isle.uv_key        = _island_uv_key(island_faces, uv_layer)
+            td = time.perf_counter()
+            t_key += (td - tc)
+            
             isle.boundary_segs = _extract_boundary_segs(
                 island_faces, face_index_set, uv_layer, uv_adj
             )
+            te = time.perf_counter()
+            t_bound += (te - td)
+            
             islands.append(isle)
 
+    utils_mod.log("timing_extract", f"fan: {t_fan*1000:.1f}ms, key: {t_key*1000:.1f}ms, bound: {t_bound*1000:.1f}ms")
     return islands
 
 

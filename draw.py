@@ -150,6 +150,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     obj_index=0, total_objs=1,
                     group_offset=0, total_global_groups=1,
                     precomputed_groups=None):
+    _t_start = time.perf_counter()
     if obj.mode != 'EDIT':
         return None, None, None, None, None
     bm_copy = None
@@ -159,6 +160,9 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
     except Exception:
         return None, None, None, None, None
 
+    _t_copy = time.perf_counter()
+    utils.log("timing_build", f"bm.copy: {(_t_copy - _t_start)*1000:.1f}ms")
+
     current_hash = None
     try:
         bm_copy.faces.ensure_lookup_table()
@@ -167,6 +171,9 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 
         uv_layer     = bm_copy.loops.layers.uv.verify()
         current_hash = _uv_hash(bm_copy, uv_layer)
+        
+        _t_hash = time.perf_counter()
+        utils.log("timing_build", f"_uv_hash: {(_t_hash - _t_copy)*1000:.1f}ms")
 
         cached = _obj_cache.get(obj.name)
         if cached and cached['hash'] == current_hash:
@@ -177,6 +184,10 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
         islands  = ix.extract_islands(
             bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name, obj.matrix_world
         )
+        
+        _t_extract = time.perf_counter()
+        utils.log("timing_build", f"extract_islands: {(_t_extract - _t_hash)*1000:.1f}ms")
+
         utils.log("id_extract", (
             f"{obj.name}: {len(islands)} islands, "
             f"{sum(len(i.tris) for i in islands)} tris, "
@@ -230,6 +241,9 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     uv2 = loops[i + 1][uv_layer].uv
                     coords.extend((p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)))
                     colors.extend((col, col, col))
+
+        _t_groups = time.perf_counter()
+        utils.log("timing_build", f"groups_and_coords: {(_t_groups - _t_extract)*1000:.1f}ms")
 
         # Batch compilation is deferred to draw_callback for safety during file load
         return current_hash, None, islands, list(coords), list(colors)
