@@ -416,4 +416,4 @@ def main_loop(argv):
             except Exception:
                 pass
 
-    return 0
+    os._exit(0)

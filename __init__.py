@@ -210,11 +210,11 @@ def stop_worker():
         pass
 
     try:
-        proc.wait(timeout=2.0)
+        proc.wait(timeout=.2)
     except subprocess.TimeoutExpired:
         proc.terminate()
         try:
-            proc.wait(timeout=1.0)
+            proc.wait(timeout=0.1)
         except Exception:
             pass
 
