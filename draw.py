@@ -23,6 +23,7 @@ _isect_self_cache  = {}
 _isect_cross_cache = {}
 
 _intersect_batches = {'hatch': None, 'checker': None}
+_intersect_raw = {'hatch': None, 'checker': None}
 
 _hatch_seg_cache       = {}
 _cross_hatch_seg_cache = {}
@@ -104,7 +105,10 @@ def full_refresh(context):
 def _get_shader():
     global _shader
     if _shader is None:
-        _shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+        try:
+            _shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+        except Exception:
+            return None
     return _shader
 
 
@@ -180,7 +184,6 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
         ))
 
         coords, colors = [], []
-        shader = _get_shader()
 
         if uv_id_mode == 'OBJECT':
             obj_col = utils.get_distinct_color(
@@ -228,11 +231,8 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     coords.extend((p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)))
                     colors.extend((col, col, col))
 
-        id_batch = (
-            batch_for_shader(shader, 'TRIS', {"pos": coords, "color": colors})
-            if coords else None
-        )
-        return current_hash, id_batch, islands, list(coords), list(colors)
+        # Batch compilation is deferred to draw_callback for safety during file load
+        return current_hash, None, islands, list(coords), list(colors)
 
     except Exception as e:
         utils.log("build", f"error ({obj.name}): {e}")
@@ -640,11 +640,10 @@ def _rebuild_hatch_from_cache(props):
     for dead in [k for k in _cross_hatch_seg_cache if k not in live_keys]:
         del _cross_hatch_seg_cache[dead]
 
-    def _make(prim, coords, colors):
-        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else False
-
-    _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
-    _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
+    _intersect_raw['hatch']   = (hatch_coords, hatch_colors) if hatch_coords else None
+    _intersect_raw['checker'] = (checker_coords, checker_colors) if checker_coords else None
+    _intersect_batches['hatch']   = None
+    _intersect_batches['checker'] = None
 
     # Offscreen tris
     _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
@@ -800,17 +799,14 @@ def _sync_classify(props):
 def _rebuild_id_opacity(props):
     """Swap alpha in cached ID batch geometry — no reclassification or island re-extraction."""
     alpha  = props.opacity
-    shader = _get_shader()
     for cache in _obj_cache.values():
         coords = cache.get('id_coords')
         rgba   = cache.get('id_rgba')
         if not coords or not rgba:
             cache['id_batch'] = None
             continue
-        colors = [(r, g, b, alpha) for r, g, b, _ in rgba]
-        cache['id_batch'] = batch_for_shader(
-            shader, 'TRIS', {"pos": coords, "color": colors}
-        )
+        cache['id_rgba'] = [(r, g, b, alpha) for r, g, b, _ in rgba]
+        cache['id_batch'] = None
 
 
 def _rebuild_intersect_opacity(props):
@@ -819,7 +815,6 @@ def _rebuild_intersect_opacity(props):
         return
 
     opacity     = props.intersect_opacity
-    shader      = _get_shader()
     checker_col = (1.0, 1.0, 1.0, opacity)
 
 
@@ -892,11 +887,10 @@ def _rebuild_intersect_opacity(props):
                 checker_coords.extend(((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0)))
                 checker_colors.extend((checker_col, checker_col))
 
-    def _make(prim, coords, colors):
-        return batch_for_shader(shader, prim, {"pos": coords, "color": colors}) if coords else False
-
-    _intersect_batches['hatch']   = _make('LINES', hatch_coords,   hatch_colors)
-    _intersect_batches['checker'] = _make('LINES', checker_coords, checker_colors)
+    _intersect_raw['hatch']   = (hatch_coords, hatch_colors) if hatch_coords else None
+    _intersect_raw['checker'] = (checker_coords, checker_colors) if checker_coords else None
+    _intersect_batches['hatch']   = None
+    _intersect_batches['checker'] = None
 
 def _rebuild_padding_batches(props):
     padding.rebuild(props, _obj_cache)
@@ -1105,15 +1099,27 @@ def draw_callback():
         if props.show_uv_id:
             for cache in _obj_cache.values():
                 b = cache.get('id_batch')
+                if b is None and cache.get('id_coords'):
+                    b = batch_for_shader(shader, 'TRIS', {"pos": cache['id_coords'], "color": cache['id_rgba']})
+                    cache['id_batch'] = b
+                    shader.bind()
                 if b:
                     b.draw(shader)
 
         if props.show_intersect:
             gpu.state.line_width_set(2.0)
+            
+            if _intersect_batches['hatch'] is None and _intersect_raw.get('hatch'):
+                coords, colors = _intersect_raw['hatch']
+                _intersect_batches['hatch'] = batch_for_shader(shader, 'LINES', {"pos": coords, "color": colors})
+                shader.bind()
             if _intersect_batches['hatch']:
                 _intersect_batches['hatch'].draw(shader)
 
-
+            if _intersect_batches['checker'] is None and _intersect_raw.get('checker'):
+                coords, colors = _intersect_raw['checker']
+                _intersect_batches['checker'] = batch_for_shader(shader, 'LINES', {"pos": coords, "color": colors})
+                shader.bind()
             if _intersect_batches['checker']:
                 _intersect_batches['checker'].draw(shader)
 
