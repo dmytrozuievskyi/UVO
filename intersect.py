@@ -317,32 +317,76 @@ def _tris_overlap_sat(t1, t2):
 _SAT_SORT_MIN = 16  # proximity sort only pays off above this triangle count
 
 
+def _point_in_polygon(pt, boundary_segs):
+    x, y = pt
+    inside = False
+    for (p1, p2) in boundary_segs:
+        x1, y1 = p1
+        x2, y2 = p2
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
+            inside = not inside
+    return inside
+
+
 def _sat_overlap(island_a, island_b):
-    """SAT fallback — handles containment and parallel-edge cases. Proximity-sorted for large islands."""
+    """SAT fallback — handles containment and parallel-edge cases. Optimized with a spatial grid for large islands."""
     tris_a = island_a.tris
     tris_b = island_b.tris
 
-    if len(tris_a) >= _SAT_SORT_MIN and len(tris_b) >= _SAT_SORT_MIN:
-        bx = (island_b.aabb[0] + island_b.aabb[2]) * 0.5
-        by = (island_b.aabb[1] + island_b.aabb[3]) * 0.5
-        ax = (island_a.aabb[0] + island_a.aabb[2]) * 0.5
-        ay = (island_a.aabb[1] + island_a.aabb[3]) * 0.5
-        ctrs_a = island_a.tri_centers
-        ctrs_b = island_b.tri_centers
-        order_a = sorted(range(len(tris_a)),
-                         key=lambda i: (ctrs_a[i][0]-bx)**2 + (ctrs_a[i][1]-by)**2)
-        order_b = sorted(range(len(tris_b)),
-                         key=lambda i: (ctrs_b[i][0]-ax)**2 + (ctrs_b[i][1]-ay)**2)
-        for ia in order_a:
-            for ib in order_b:
-                if _tris_overlap_sat(tris_a[ia], tris_b[ib]):
+    if len(tris_a) < _SAT_SORT_MIN or len(tris_b) < _SAT_SORT_MIN:
+        for ta in tris_a:
+            for tb in tris_b:
+                if _tris_overlap_sat(ta, tb):
                     return True
         return False
 
+    mn_u, mn_v, mx_u, mx_v = island_b.aabb
+    cell_size = max(0.01, (mx_u - mn_u) / 10.0, (mx_v - mn_v) / 10.0)
+    
+    grid_b = {}
+    for ib, tb in enumerate(tris_b):
+        b_mn_u = min(tb[0][0], tb[1][0], tb[2][0])
+        b_mn_v = min(tb[0][1], tb[1][1], tb[2][1])
+        b_mx_u = max(tb[0][0], tb[1][0], tb[2][0])
+        b_mx_v = max(tb[0][1], tb[1][1], tb[2][1])
+        
+        cx0 = int(math.floor(b_mn_u / cell_size))
+        cy0 = int(math.floor(b_mn_v / cell_size))
+        cx1 = int(math.floor(b_mx_u / cell_size))
+        cy1 = int(math.floor(b_mx_v / cell_size))
+        
+        entry = (ib, b_mn_u, b_mn_v, b_mx_u, b_mx_v)
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                key = (cx, cy)
+                if key not in grid_b:
+                    grid_b[key] = []
+                grid_b[key].append(entry)
+
     for ta in tris_a:
-        for tb in tris_b:
-            if _tris_overlap_sat(ta, tb):
-                return True
+        a_mn_u = min(ta[0][0], ta[1][0], ta[2][0])
+        a_mn_v = min(ta[0][1], ta[1][1], ta[2][1])
+        a_mx_u = max(ta[0][0], ta[1][0], ta[2][0])
+        a_mx_v = max(ta[0][1], ta[1][1], ta[2][1])
+        
+        cx0 = int(math.floor(a_mn_u / cell_size))
+        cy0 = int(math.floor(a_mn_v / cell_size))
+        cx1 = int(math.floor(a_mx_u / cell_size))
+        cy1 = int(math.floor(a_mx_v / cell_size))
+        
+        tested_b = set()
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                key = (cx, cy)
+                if key in grid_b:
+                    for ib, b_mn_u, b_mn_v, b_mx_u, b_mx_v in grid_b[key]:
+                        if ib in tested_b:
+                            continue
+                        tested_b.add(ib)
+                        if not (a_mx_u < b_mn_u - EPSILON or b_mx_u < a_mn_u - EPSILON or
+                                a_mx_v < b_mn_v - EPSILON or b_mx_v < a_mn_v - EPSILON):
+                            if _tris_overlap_sat(ta, tris_b[ib]):
+                                return True
     return False
 
 
@@ -351,7 +395,14 @@ def _islands_overlap_contour(a, b):
     if a.boundary_segs and b.boundary_segs:
         if _boundaries_intersect(a.boundary_segs, b.boundary_segs):
             return True
-    # Stage 2: SAT — handles containment and parallel-edge cases.
+            
+        # Stage 2: Fast point-in-polygon check for containment.
+        if a.tri_centers and _point_in_polygon(a.tri_centers[0], b.boundary_segs):
+            return True
+        if b.tri_centers and _point_in_polygon(b.tri_centers[0], a.boundary_segs):
+            return True
+            
+    # Stage 3: SAT — handles containment and parallel-edge cases.
     return _sat_overlap(a, b)
 
 
