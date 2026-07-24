@@ -28,21 +28,17 @@ def _init_ipc():
     ipc_out = sys.stdout.buffer
     sys.stdout = sys.stderr
 
-_LOG_PATH = None
 DEBUG_MODE = False
 
 
 def _wlog(msg):
-    if not DEBUG_MODE or not _LOG_PATH:
+    if not DEBUG_MODE:
         return
         
     ts   = time.strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}\n"
-    try:
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:
-        pass
+    # Worker's sys.stdout is redirected to sys.stderr, which is captured
+    # by the main Blender process and printed to the system console.
+    print(f"[{ts}] {msg}")
 
 
 
@@ -364,19 +360,11 @@ def main_loop(argv):
         except Exception:
             pass
 
-    global DEBUG_MODE, _LOG_PATH
+    global DEBUG_MODE
     if "--uvo-debug" in argv:
         DEBUG_MODE = True
         pid = os.getpid()
-        _LOG_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), f"uvo_worker_{pid}.log")
-        try:
-            with open(_LOG_PATH, "w", encoding="utf-8") as f:
-                f.write(f"=== UVO worker started pid={pid} ===\n")
-            with open(os.path.join(os.environ.get("TEMP", "/tmp"),
-                                   "uvo_worker_latest.log.pid"), "w") as f:
-                f.write(_LOG_PATH)
-        except Exception:
-            pass
+        print(f"=== UVO worker started pid={pid} ===")
 
     _wlog("worker starting — importing addon modules")
     _wlog("entering job loop")
