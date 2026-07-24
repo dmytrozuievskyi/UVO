@@ -8,6 +8,7 @@ import sys
 # Background worker launched via Blender's CLI command mechanism
 
 _worker_process  = None    # subprocess.Popen
+_worker_start_time = None
 _next_job_id     = 0
 _ipc_buffer      = bytearray()
 _worker_synced_objects = {}           # {obj_name: hash} tracks worker's mesh cache state
@@ -138,6 +139,13 @@ def get_worker_results():
         del _ipc_buffer[:sync_idx + 8]
         _ipc_synced = True
         
+        global _worker_start_time
+        if _worker_start_time is not None:
+            import time
+            elapsed = time.time() - _worker_start_time
+            print(f"[UVO] Worker ready in {elapsed:.2f}s")
+            _worker_start_time = None
+        
         if _pending_job is not None:
             try:
                 _write_job(proc, _pending_job)
@@ -189,6 +197,9 @@ def start_worker():
         kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW | 0x00000200
 
     try:
+        import time
+        global _worker_start_time
+        _worker_start_time = time.time()
         _worker_process = subprocess.Popen(cmd, **kwargs)
         print(f"[UVO] Worker process started (pid={_worker_process.pid})")
     except Exception as e:
