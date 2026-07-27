@@ -13,7 +13,7 @@ UV_DECIMAL = 3
 
 
 class Island:
-    __slots__ = ('tris', 'aabb', 'uv_key', 'color', 'object_name',
+    __slots__ = ('tris', 'aabb', 'uv_key', 'local_key', 'ref_a', 'ref_b', 'color', 'object_name',
                  'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area')
 
     def __init__(self, tris, color, object_name=''):
@@ -21,6 +21,9 @@ class Island:
         self.color         = color
         self.object_name   = object_name
         self.uv_key        = None
+        self.local_key     = None
+        self.ref_a         = (0.0, 0.0)
+        self.ref_b         = (0.0, 0.0)
         self.boundary_segs = []
         self.jacobians     = []
         self.uv_area       = 0.0
@@ -152,7 +155,22 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
             isle.surface_area  = surf_area
             
             tc = time.perf_counter()
-            isle.uv_key        = _island_uv_key(island_faces, uv_layer)
+            uv_key = _island_uv_key(island_faces, uv_layer)
+            isle.uv_key = uv_key
+            
+            isle.local_key = (len(tris), round(surf_area, 5), len(uv_key), round(uv_area, 5))
+            ref_a = tris[0][0] if tris else (0.0, 0.0)
+            ref_b = ref_a
+            for t in tris:
+                for v in t:
+                    if (v[0]-ref_a[0])**2 + (v[1]-ref_a[1])**2 > 1e-8:
+                        ref_b = v
+                        break
+                if ref_b != ref_a:
+                    break
+            isle.ref_a = ref_a
+            isle.ref_b = ref_b
+            
             td = time.perf_counter()
             t_key += (td - tc)
             

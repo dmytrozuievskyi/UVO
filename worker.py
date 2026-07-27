@@ -78,6 +78,9 @@ def _deserialize_island(d, ix):
     isle               = ix.Island(tris, d['color'], d['object_name'])
     isle.boundary_segs = boundary_segs
     isle.uv_key        = d['uv_key']
+    isle.local_key     = d.get('local_key')
+    isle.ref_a         = d.get('ref_a', (0.0, 0.0))
+    isle.ref_b         = d.get('ref_b', (0.0, 0.0))
     isle.jacobians     = d.get('jacobians', [])
     isle.uv_area       = d.get('uv_area', 0.0)
     isle.surface_area  = d.get('surface_area', 0.0)
@@ -90,6 +93,7 @@ def _deserialize_island(d, ix):
 
 _worker_mesh_cache = {}  # {name: {'hash': int, 'islands': list, 'det_islands': list}}
 _stretch_cache     = {}  # {name: [(cache_key, result), ...]}  per-island stretch results
+_stretch_local_cache = {}  # {name: {local_cache_key: {'ref_a': A, 'ref_b': B, 'result': ...}}}
 
 
 def _run_classify(objects, cross_prev, tiled, job_id, ix):
@@ -163,6 +167,53 @@ def _run_classify(objects, cross_prev, tiled, job_id, ix):
     return self_results, cross_results
 
 
+def _compute_rigid_transform(old_a, old_b, new_a, new_b):
+    old_dx = old_b[0] - old_a[0]
+    old_dy = old_b[1] - old_a[1]
+    new_dx = new_b[0] - new_a[0]
+    new_dy = new_b[1] - new_a[1]
+    
+    old_len = math.sqrt(old_dx**2 + old_dy**2)
+    new_len = math.sqrt(new_dx**2 + new_dy**2)
+    scale_ratio = new_len / old_len if old_len > 1e-10 else 1.0
+    
+    denom = old_len * new_len
+    if denom < 1e-10:
+        return scale_ratio, (1.0, 0.0, 0.0, 1.0, new_a[0] - old_a[0], new_a[1] - old_a[1])
+    
+    cos_t = (old_dx * new_dx + old_dy * new_dy) / denom
+    sin_t = (old_dx * new_dy - old_dy * new_dx) / denom
+    
+    s = scale_ratio
+    m00 = s * cos_t
+    m01 = -s * sin_t
+    m10 = s * sin_t
+    m11 = s * cos_t
+    tx = new_a[0] - (m00 * old_a[0] + m01 * old_a[1])
+    ty = new_a[1] - (m10 * old_a[0] + m11 * old_a[1])
+    
+    return scale_ratio, (m00, m01, m10, m11, tx, ty)
+
+
+def _apply_rigid_transform(result, transform):
+    m00, m01, m10, m11, tx, ty = transform
+    
+    new_coords = []
+    for u, v, z in result['coords']:
+        new_coords.append((m00*u + m01*v + tx, m10*u + m11*v + ty, z))
+    
+    new_warped = []
+    for wu, wv in result['warped_uvs']:
+        new_warped.append((m00*wu + m01*wv + tx, m10*wu + m11*wv + ty))
+    
+    return {
+        'coords':         new_coords,
+        'warped_uvs':     new_warped,
+        'checker_colors': result['checker_colors'],
+        'heatmap_colors': result['heatmap_colors'],
+    }
+
+
 def _run_stretch(objects, job_id):
     """Compute stretch overlay for all objects. Returns stretch_results dict.
 
@@ -170,7 +221,7 @@ def _run_stretch(objects, job_id):
     _worker_mesh_cache must already be populated before calling.
     """
     stretch_results = {}
-    total_cached = total_computed = 0
+    total_cached = total_transform_hit = total_computed = 0
 
     for obj in objects:
         name     = obj['name']
@@ -183,25 +234,85 @@ def _run_stretch(objects, job_id):
             continue
 
         prev_by_key = {ck: res for ck, res in _stretch_cache.get(name, [])}
+        local_prev_by_key = _stretch_local_cache.get(name, {})
 
-        new_isle_cache     = []
-        all_coords         = []
-        all_warped         = []
-        all_checker_colors = []
-        all_heatmap_colors = []
+        new_isle_cache       = []
+        new_local_isle_cache = {}
+        all_coords           = []
+        all_warped           = []
+        all_checker_colors   = []
+        all_heatmap_colors   = []
 
         for isle in islands:
-            cache_key     = (isle.uv_key, tex_w, tex_h, target_tx)
+            cache_key       = (isle.uv_key, tex_w, tex_h, target_tx)
+            local_cache_key = (isle.local_key, tex_w, tex_h, target_tx)
+            
             cached_result = prev_by_key.get(cache_key)
 
             if cached_result is not None:
                 total_cached += 1
                 r = cached_result
+                # Keep local cache populated for future transform detection
+                old_local = local_prev_by_key.get(local_cache_key)
+                if old_local:
+                    new_local_isle_cache[local_cache_key] = old_local
+                else:
+                    new_local_isle_cache[local_cache_key] = {
+                        'ref_a': isle.ref_a, 'ref_b': isle.ref_b,
+                        'result': r
+                    }
+            elif local_cache_key in local_prev_by_key:
+                old_entry = local_prev_by_key[local_cache_key]
+                scale_ratio, transform = _compute_rigid_transform(
+                    old_entry['ref_a'], old_entry['ref_b'], isle.ref_a, isle.ref_b)
+                
+                # Verify transform using cached coords to avoid false positives
+                is_valid = True
+                m00, m01, m10, m11, tx, ty = transform
+                old_coords = old_entry['result']['coords']
+                if len(old_coords) != len(isle.tris) * 3:
+                    is_valid = False
+                else:
+                    idx = 0
+                    for tri in isle.tris:
+                        for nu, nv in tri:
+                            ou, ov, _ = old_coords[idx]
+                            tu = m00*ou + m01*ov + tx
+                            tv = m10*ou + m11*ov + ty
+                            if abs(tu - nu) > 1e-4 or abs(tv - nv) > 1e-4:
+                                is_valid = False
+                                break
+                            idx += 1
+                        if not is_valid: break
+                
+                if is_valid and abs(scale_ratio - 1.0) < 0.001:
+                    total_transform_hit += 1
+                    r = _apply_rigid_transform(old_entry['result'], transform)
+                    
+                    new_local_isle_cache[local_cache_key] = {
+                        'ref_a': isle.ref_a, 'ref_b': isle.ref_b,
+                        'result': r
+                    }
+                else:
+                    total_computed += 1
+                    co, wuv, chk, hm = _stretch_compute_island(isle, tex_w, tex_h, target_tx)
+                    r = {'coords': co, 'warped_uvs': wuv,
+                         'checker_colors': chk, 'heatmap_colors': hm}
+                    
+                    new_local_isle_cache[local_cache_key] = {
+                        'ref_a': isle.ref_a, 'ref_b': isle.ref_b,
+                        'result': r
+                    }
             else:
                 total_computed += 1
                 co, wuv, chk, hm = _stretch_compute_island(isle, tex_w, tex_h, target_tx)
                 r = {'coords': co, 'warped_uvs': wuv,
                      'checker_colors': chk, 'heatmap_colors': hm}
+                
+                new_local_isle_cache[local_cache_key] = {
+                    'ref_a': isle.ref_a, 'ref_b': isle.ref_b,
+                    'result': r
+                }
 
             new_isle_cache.append((cache_key, r))
             all_coords.extend(r['coords'])
@@ -210,6 +321,7 @@ def _run_stretch(objects, job_id):
             all_heatmap_colors.extend(r['heatmap_colors'])
 
         _stretch_cache[name] = new_isle_cache
+        _stretch_local_cache[name] = new_local_isle_cache
         stretch_results[name] = {
             'coords':         all_coords,
             'warped_uvs':     all_warped,
@@ -217,7 +329,7 @@ def _run_stretch(objects, job_id):
             'heatmap_colors': all_heatmap_colors,
         }
 
-    _wlog(f"job {job_id}: stretch computed={total_computed} cached={total_cached}")
+    _wlog(f"job {job_id}: stretch computed={total_computed} cached={total_cached} transform={total_transform_hit}")
     return stretch_results
 
 
@@ -240,6 +352,9 @@ def _handle_compute(job, ix):
     for name in list(_stretch_cache):
         if name not in active_names:
             del _stretch_cache[name]
+    for name in list(_stretch_local_cache):
+        if name not in active_names:
+            del _stretch_local_cache[name]
 
     objects = []
     for od in obj_data:
