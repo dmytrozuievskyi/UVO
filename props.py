@@ -131,7 +131,7 @@ def _sync_tex_cache_and_rebuild(self, context):
     if props.show_stretch:
         from . import stretch
         stretch.rebuild(props, draw._obj_cache, context)
-        draw.tag_redraw(context)
+        draw._tag_redraw()
 
 
 def update_tex_res_x(self, context):
