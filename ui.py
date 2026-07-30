@@ -105,6 +105,22 @@ class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
         split_str.prop(props, "stretch_mode", text="")
         split_str.prop(props, "stretch_opacity", text="", slider=True)
 
+        layout.label(text="Normals")
+
+        row_nrm = layout.row(align=False)
+        row_nrm.prop(props, "show_normal_overlay", text="")
+
+        content_nrm = row_nrm.row(align=False)
+        content_nrm.enabled = props.show_normal_overlay and active
+
+        split_nrm = content_nrm.split(factor=0.5, align=False)
+        split_nrm.prop(props, "normal_overlay_threshold", text="")
+
+        row_xyz = split_nrm.row(align=True)
+        row_xyz.prop(props, "normal_filter_x", text="X", toggle=True)
+        row_xyz.prop(props, "normal_filter_y", text="Y", toggle=True)
+        row_xyz.prop(props, "normal_filter_z", text="Z", toggle=True)
+
         layout.separator()
 
         if props.show_stretch or props.show_padding:

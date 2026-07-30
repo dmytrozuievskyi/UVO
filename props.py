@@ -13,7 +13,7 @@ def _sync_draw(context):
         and space.overlay.show_overlays
     )
     addon_on   = not props.is_muted
-    any_active = props.show_uv_id or props.show_intersect or props.show_padding or props.show_stretch
+    any_active = props.show_uv_id or props.show_intersect or props.show_padding or props.show_stretch or props.show_normal_overlay
 
     should_draw = native_on and addon_on and any_active
 
@@ -151,6 +151,10 @@ def update_tex_res_y(self, context):
 
 
 def update_stretch(self, context):
+    _sync_draw(context)
+
+
+def update_normal_overlay(self, context):
     _sync_draw(context)
 
 
@@ -406,6 +410,51 @@ class UVIDProperties(bpy.types.PropertyGroup):
         subtype='FACTOR',
         description="Stretch overlay opacity",
         update=update_stretch_opacity,
+    )
+    show_normal_overlay: bpy.props.BoolProperty(
+        default=False,
+        name="Normals",
+        description="Visualize 3D surface normal orientation of UV islands",
+        update=update_normal_overlay,
+    )
+    normal_overlay_threshold: bpy.props.EnumProperty(
+        name="Threshold",
+        items=[
+            ('90', "90°", "6 cardinal axes"),
+            ('45', "45°", "26 directional axes"),
+            ('NONE', "Average", "Average normal of the entire island"),
+        ],
+        default='90',
+        description="Threshold for grouping face normals",
+        update=update_normal_overlay,
+    )
+    normal_overlay_space: bpy.props.EnumProperty(
+        name="Space",
+        items=[
+            ('GLOBAL', "Global", "World space normals"),
+            ('LOCAL', "Local", "Object space normals"),
+        ],
+        default='LOCAL',
+        description="Space to evaluate normals in",
+        update=update_normal_overlay,
+    )
+    normal_filter_x: bpy.props.BoolProperty(
+        default=True,
+        name="X",
+        description="Show X axis normals",
+        update=update_normal_overlay,
+    )
+    normal_filter_y: bpy.props.BoolProperty(
+        default=True,
+        name="Y",
+        description="Show Y axis normals",
+        update=update_normal_overlay,
+    )
+    normal_filter_z: bpy.props.BoolProperty(
+        default=True,
+        name="Z",
+        description="Show Z axis normals",
+        update=update_normal_overlay,
     )
 
 
