@@ -21,8 +21,13 @@ def get_arrow_geometry(origin, vector, is_positive):
     
     line_coords = [ (ox, oy, 0.0), (end_x, end_y, 0.0) ]
     
-    head_len = 0.04
-    head_half_width = 0.02
+    head_len = 0.004
+    head_half_width = 0.002
+    
+    if head_len > length * 0.5:
+        ratio = (length * 0.5) / head_len
+        head_len *= ratio
+        head_half_width *= ratio
     
     if is_positive:
         tip_x, tip_y = end_x, end_y
@@ -71,32 +76,45 @@ def _add_arrow(origin, vector, is_positive, color, out_lines, out_lines_colors, 
         del tc[-3:]
 
 
+_normal_data = {}
+_cached_filter_state = None
+
+def rebuild_from_worker_data(results):
+    global _normal_data, _cached_filter_state
+    _normal_data = results
+    _cached_filter_state = None  # Force rebuild on next draw
+
 def _rebuild_batches(props):
-    global _batch_lines, _batch_tris
+    global _batch_lines, _batch_tris, _normal_data, _cached_filter_state
+    
+    current_filters = (props.normal_filter_x, props.normal_filter_y, props.normal_filter_z)
+    if _cached_filter_state == current_filters:
+        return
+        
+    _cached_filter_state = current_filters
     
     line_coords, line_colors = [], []
     tri_coords, tri_colors = [], []
     
-    max_len = 0.2  # Max length representing 1.0 component
+    max_len = 0.04  # Max length representing 1.0 component
     diag = max_len * 0.7071  # sin(45) and cos(45)
     
-    # Simulate Island 1: Positive X, Positive Y, Positive Z
-    origin1 = (0.3, 0.5)
-    if props.normal_filter_x:
-        _add_arrow(origin1, (max_len * 0.8, 0.0), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-    if props.normal_filter_y:
-        _add_arrow(origin1, (0.0, max_len * 0.5), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-    if props.normal_filter_z:
-        _add_arrow(origin1, (diag * 0.3, diag * 0.3), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-        
-    # Simulate Island 2: Negative X, Negative Y, Negative Z
-    origin2 = (0.7, 0.5)
-    if props.normal_filter_x:
-        _add_arrow(origin2, (-max_len * 0.6, 0.0), False, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-    if props.normal_filter_y:
-        _add_arrow(origin2, (0.0, -max_len * 0.9), False, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-    if props.normal_filter_z:
-        _add_arrow(origin2, (-diag * 0.7, -diag * 0.7), False, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+    for obj_name, obj_groups in _normal_data.items():
+        for island_groups in obj_groups:
+            for g in island_groups:
+                center = g['center']
+                vx, vy, vz = g['vector']
+                
+                if props.normal_filter_x and abs(vx) > 1e-4:
+                    _add_arrow(center, (vx * max_len, 0.0), vx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                if props.normal_filter_y and abs(vy) > 1e-4:
+                    _add_arrow(center, (0.0, vy * max_len), vy > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                if props.normal_filter_z and abs(vz) > 1e-4:
+                    z_len = abs(vz) * max_len
+                    # Diagonal for Z
+                    dz = z_len * 0.7071
+                    # Vector is diagonal. We point it top-right for +Z, bottom-left for -Z
+                    _add_arrow(center, (dz if vz > 0 else -dz, dz if vz > 0 else -dz), vz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
 
     try:
         shader = gpu.shader.from_builtin('SMOOTH_COLOR')
@@ -124,6 +142,8 @@ def draw(props, shader, context):
         _batch_tris.draw(shader)
 
 def clear():
-    global _batch_lines, _batch_tris
+    global _batch_lines, _batch_tris, _normal_data, _cached_filter_state
     _batch_lines = None
     _batch_tris = None
+    _normal_data = {}
+    _cached_filter_state = None

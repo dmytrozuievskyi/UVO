@@ -39,6 +39,7 @@ _shader = None
 # Async job tracking
 _classify_job_id   = 0
 _stretch_job_id    = 0
+_normals_job_id    = 0
 _result_timer_fn   = None
 _busy_frame        = 0
 _job_start_times   = {}
@@ -299,6 +300,8 @@ def _serialize_islands_for_worker(tiled):
                     'jacobians':    isle.jacobians,
                     'uv_area':      isle.uv_area,
                     'surface_area': isle.surface_area,
+                    'face_normals': isle.face_normals,
+                    'face_areas':   isle.face_areas,
                     'aabb':         isle.aabb,
                 })
             if pkg:
@@ -338,7 +341,7 @@ def _serialize_islands_for_worker(tiled):
 
 def _dispatch_worker_job(props):
     """Sync island data (Delta-IPC) and dispatch a unified compute job to the worker."""
-    global _classify_job_id, _stretch_job_id
+    global _classify_job_id, _stretch_job_id, _normals_job_id
     import sys as _sys
     pkg = _sys.modules.get(__package__)
     if pkg is None:
@@ -349,6 +352,7 @@ def _dispatch_worker_job(props):
 
     do_classify = props.show_intersect and not props.is_muted
     do_stretch  = props.show_stretch  and not props.is_muted
+    do_normals  = props.show_normal_overlay and not props.is_muted
 
 
     tiled = (props.intersect_uv_mode == 'TILED')
@@ -368,15 +372,21 @@ def _dispatch_worker_job(props):
         _classify_job_id = job_id
     if do_stretch:
         _stretch_job_id = job_id
+    if do_normals:
+        _normals_job_id = job_id
+        
+    utils.log("async", f"dispatching job {job_id}: classify={do_classify} stretch={do_stretch} normals={do_normals}")
 
     ok = pkg.send_job({
         'id':          job_id,
         'type':        'compute',
         'objects':     objects,
         'tiled':       tiled,
-        'cross_prev':  cross_prev if do_classify else {},
+        'cross_prev':  _isect_cross_cache,
         'do_classify': do_classify,
         'do_stretch':  do_stretch,
+        'do_normals':  do_normals,
+        'normal_threshold': props.normal_overlay_threshold,
     })
     
     import time
@@ -394,7 +404,7 @@ def _start_result_poller():
         return  # already running
 
     def _poll():
-        global _result_timer_fn, _classify_job_id, _stretch_job_id, _busy_frame
+        global _result_timer_fn, _classify_job_id, _stretch_job_id, _normals_job_id, _busy_frame
         import sys as _sys
         pkg = _sys.modules.get(__package__)
         if pkg is None:
@@ -405,6 +415,7 @@ def _start_result_poller():
         if proc is None or proc.poll() is not None:
             _classify_job_id = 0
             _stretch_job_id = 0
+            _normals_job_id = 0
             _result_timer_fn = None
             _tag_redraw()
             return None
@@ -422,6 +433,11 @@ def _start_result_poller():
                 utils.log("async", f"worker error: {result.get('msg')}")
                 if rid == _classify_job_id: _classify_job_id = 0
                 if rid == _stretch_job_id: _stretch_job_id = 0
+                if rid == _normals_job_id: _normals_job_id = 0
+            elif rtype == 'compute_cancel':
+                if rid == _classify_job_id: _classify_job_id = 0
+                if rid == _stretch_job_id: _stretch_job_id = 0
+                if rid == _normals_job_id: _normals_job_id = 0
             elif rtype == 'compute_result':
                 is_latest = False
                 if rid == _classify_job_id:
@@ -429,6 +445,9 @@ def _start_result_poller():
                     is_latest = True
                 if rid == _stretch_job_id:
                     _stretch_job_id = 0
+                    is_latest = True
+                if rid == _normals_job_id:
+                    _normals_job_id = 0
                     is_latest = True
                 
                 if is_latest:
@@ -440,14 +459,14 @@ def _start_result_poller():
 
         if not got_any:
             # Nothing ready — keep polling if jobs are still in flight
-            if _classify_job_id == 0 and _stretch_job_id == 0:
+            if _classify_job_id == 0 and _stretch_job_id == 0 and _normals_job_id == 0:
                 _result_timer_fn = None
                 return None
             _busy_frame += 1
             _tag_redraw()
             return 0.05
 
-        if _classify_job_id != 0 or _stretch_job_id != 0:
+        if _classify_job_id != 0 or _stretch_job_id != 0 or _normals_job_id != 0:
             _busy_frame += 1
             return 0.05
 
@@ -539,12 +558,18 @@ def _apply_worker_result(result):
 
         utils.log("async", f"classify result applied, job_id={job_id}")
 
-    # ── Stretch ──
     if 'stretch_results' in result:
         stretch_data = result.get('stretch_results', {})
         if stretch_data:
             stretch.rebuild_from_worker_data(stretch_data)
         utils.log("async", f"stretch result applied, job_id={job_id}")
+        
+    # ── Normals ──
+    if 'normal_results' in result:
+        normal_data = result.get('normal_results', {})
+        if normal_data:
+            normals.rebuild_from_worker_data(normal_data)
+        utils.log("async", f"normals result applied, job_id={job_id}")
 
     _tag_redraw()
 
@@ -996,8 +1021,10 @@ def update_batches_safe(context):
             any_changed or (_intersect_batches['hatch'] is None and _result_timer_fn is None))
         needs_stretch = props.show_stretch and not props.is_muted and (
             any_changed or stretch._geo_batch is None)
+        needs_normals = props.show_normal_overlay and not props.is_muted and (
+            any_changed or (not hasattr(normals, '_normal_data') or not normals._normal_data))
 
-        if needs_classify or needs_stretch:
+        if needs_classify or needs_stretch or needs_normals:
             # Skip if worker already busy; poller will trigger redraw on completion.
             if _result_timer_fn is not None:
                 utils.log("async", "skipping dispatch — worker already busy")
@@ -1040,7 +1067,7 @@ def depsgraph_update_handler(scene, depsgraph):
     prop = getattr(scene, "uv_id_props", None)
     if not prop or prop.is_muted:
         return
-    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding and not prop.show_stretch:
+    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding and not prop.show_stretch and not prop.show_normal_overlay:
         return
 
     if bpy.context.mode != 'EDIT_MESH':
@@ -1068,7 +1095,7 @@ def depsgraph_update_handler(scene, depsgraph):
 
     # Empty cache in edit mode → just entered edit or enabled an overlay.
     force_rebuild = False
-    if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch):
+    if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch or prop.show_normal_overlay):
         force_rebuild = True
 
 

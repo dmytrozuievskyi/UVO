@@ -84,6 +84,8 @@ def _deserialize_island(d, ix):
     isle.jacobians     = d.get('jacobians', [])
     isle.uv_area       = d.get('uv_area', 0.0)
     isle.surface_area  = d.get('surface_area', 0.0)
+    isle.face_normals  = d.get('face_normals', [])
+    isle.face_areas    = d.get('face_areas', [])
     if 'aabb' in d:
         isle.aabb = d['aabb']
     return isle
@@ -94,6 +96,100 @@ def _deserialize_island(d, ix):
 _worker_mesh_cache = {}  # {name: {'hash': int, 'islands': list, 'det_islands': list}}
 _stretch_cache     = {}  # {name: [(cache_key, result), ...]}  per-island stretch results
 _stretch_local_cache = {}  # {name: {local_cache_key: {'ref_a': A, 'ref_b': B, 'result': ...}}}
+_normals_cache     = {}  # {name: {'hash': int, 'threshold': str, 'result': list}}
+
+def _run_normals(objects, job_id, threshold):
+    results = {}
+    total_groups = 0
+    
+    # 90 = 6 dirs, 45 = 26 dirs, AVERAGE = 1 dir
+    ref_dirs = []
+    if threshold == '90':
+        ref_dirs = [
+            (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)
+        ]
+    elif threshold == '45':
+        for x in (-1, 0, 1):
+            for y in (-1, 0, 1):
+                for z in (-1, 0, 1):
+                    if x == 0 and y == 0 and z == 0: continue
+                    l = math.sqrt(x*x + y*y + z*z)
+                    ref_dirs.append((x/l, y/l, z/l))
+                    
+    for od in objects:
+        name = od['name']
+        h = od['hash']
+        islands = od['islands']
+        
+        cached = _normals_cache.get(name)
+        if cached and cached['hash'] == h and cached['threshold'] == threshold:
+            results[name] = cached['result']
+            continue
+            
+        obj_result = []
+        for isle in islands:
+            if not isle.face_normals:
+                continue
+                
+            groups = {}  # ref_idx -> {'sum_nx': 0, 'sum_ny': 0, 'sum_nz': 0, 'sum_u': 0, 'sum_v': 0, 'count': 0}
+            
+            for i, fn in enumerate(isle.face_normals):
+                area = isle.face_areas[i]
+                if area < 1e-8:
+                    continue
+                    
+                # fn is unnormalized, length is 2*area. So actual normal is fn / (2*area)
+                l = math.sqrt(fn[0]**2 + fn[1]**2 + fn[2]**2)
+                if l < 1e-8:
+                    continue
+                nx, ny, nz = fn[0]/l, fn[1]/l, fn[2]/l
+                
+                best_idx = 0
+                if threshold != 'AVERAGE':
+                    best_dot = -2.0
+                    for ridx, rd in enumerate(ref_dirs):
+                        dot = nx*rd[0] + ny*rd[1] + nz*rd[2]
+                        if dot > best_dot:
+                            best_dot = dot
+                            best_idx = ridx
+                            
+                if best_idx not in groups:
+                    groups[best_idx] = {'nx': 0, 'ny': 0, 'nz': 0, 'u': 0, 'v': 0, 'count': 0}
+                    
+                g = groups[best_idx]
+                g['nx'] += fn[0] * 0.5  # true area-weighted component
+                g['ny'] += fn[1] * 0.5
+                g['nz'] += fn[2] * 0.5
+                
+                # UV center of the face
+                tri = isle.tris[i]
+                cu = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0
+                cv = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0
+                g['u'] += cu * area
+                g['v'] += cv * area
+                g['count'] += area
+                
+            island_groups = []
+            total_island_area = isle.surface_area
+            if total_island_area < 1e-8:
+                total_island_area = 1.0
+                
+            for g in groups.values():
+                if g['count'] < 1e-8:
+                    continue
+                island_groups.append({
+                    'center': (g['u'] / g['count'], g['v'] / g['count']),
+                    'vector': (g['nx'] / g['count'], g['ny'] / g['count'], g['nz'] / g['count'])
+                })
+                
+            obj_result.append(island_groups)
+            
+        _normals_cache[name] = {'hash': h, 'threshold': threshold, 'result': obj_result}
+        results[name] = obj_result
+        total_groups += sum(len(g) for g in obj_result)
+        
+    _wlog(f"job {job_id}: normals computed, total islands {sum(len(od['islands']) for od in objects)}, groups {total_groups}")
+    return results
 
 
 def _run_classify(objects, cross_prev, tiled, job_id, ix):
@@ -355,6 +451,9 @@ def _handle_compute(job, ix):
     for name in list(_stretch_local_cache):
         if name not in active_names:
             del _stretch_local_cache[name]
+    for name in list(_normals_cache):
+        if name not in active_names:
+            del _normals_cache[name]
 
     objects = []
     for od in obj_data:
@@ -403,6 +502,10 @@ def _handle_compute(job, ix):
     # Stretch
     if do_stretch:
         result['stretch_results'] = _run_stretch(objects, job_id)
+        
+    # Normals
+    if job.get('do_normals', False):
+        result['normal_results'] = _run_normals(objects, job_id, job.get('normal_threshold', 'AVERAGE'))
 
     _wlog(f"job {job_id}: COMPLETE {(time.perf_counter()-t0)*1000:.0f}ms total")
     return result

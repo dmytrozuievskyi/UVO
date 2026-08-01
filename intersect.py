@@ -14,7 +14,8 @@ UV_DECIMAL = 3
 
 class Island:
     __slots__ = ('tris', 'aabb', 'uv_key', 'local_key', 'ref_a', 'ref_b', 'color', 'object_name',
-                 'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area')
+                 'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area',
+                 'face_normals', 'face_areas')
 
     def __init__(self, tris, color, object_name=''):
         self.tris          = tris
@@ -28,6 +29,8 @@ class Island:
         self.jacobians     = []
         self.uv_area       = 0.0
         self.surface_area  = 0.0
+        self.face_normals  = []
+        self.face_areas    = []
 
         if tris:
             all_u = [v[0] for t in tris for v in t]
@@ -144,7 +147,7 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
         island_faces = [bm_copy.faces[i] for i in face_index_set]
         
         ta = time.perf_counter()
-        tris, jacobians, uv_area, surf_area = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
+        tris, jacobians, uv_area, surf_area, face_normals, face_areas = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
         tb = time.perf_counter()
         t_fan += (tb - ta)
 
@@ -153,6 +156,8 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
             isle.jacobians     = jacobians
             isle.uv_area       = uv_area
             isle.surface_area  = surf_area
+            isle.face_normals  = face_normals
+            isle.face_areas    = face_areas
             
             tc = time.perf_counter()
             uv_key = _island_uv_key(island_faces, uv_layer)
@@ -189,6 +194,8 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
 def _fan_tris_and_data(faces, uv_layer, matrix_world):
     tris = []
     jacobians = []
+    face_normals = []
+    face_areas = []
     total_uv_area = 0.0
     total_surf_area = 0.0
 
@@ -233,6 +240,15 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
             dp2 = p2 - p0
             surf_area = dp1.cross(dp2).length * 0.5
             total_surf_area += surf_area
+            
+            lp0 = l0.vert.co
+            lp1 = l1.vert.co
+            lp2 = l2.vert.co
+            ldp1 = lp1 - lp0
+            ldp2 = lp2 - lp0
+            cross_local = ldp1.cross(ldp2)
+            face_normals.append((cross_local.x, cross_local.y, cross_local.z))
+            face_areas.append(cross_local.length * 0.5)
 
 
             if abs(det_uv) < 1e-12:
@@ -265,7 +281,7 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
             M11 = (G + s) / t
             jacobians.append((M00, M01, M10, M11))
 
-    return tris, jacobians, total_uv_area, total_surf_area
+    return tris, jacobians, total_uv_area, total_surf_area, face_normals, face_areas
 
 
 def _island_uv_key(faces, uv_layer):
