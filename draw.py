@@ -12,6 +12,7 @@ from . import intersect as ix
 from . import offscreen
 from . import padding
 from . import stretch
+from . import normals
 
 draw_handler   = None
 is_calculating = False
@@ -1017,6 +1018,9 @@ def update_batches_safe(context):
             _intersect_batches['checker'] = None
         if not (props.show_stretch and not props.is_muted):
             stretch.clear()
+            
+        if not (props.show_normal_overlay and not props.is_muted):
+            normals.clear()
 
         if props.show_padding and not props.is_muted:
             if any_changed or padding.batches['ok'] is None:
@@ -1111,6 +1115,10 @@ def draw_callback():
         if props.show_stretch:
             stretch.draw(props, shader, bpy.context)
             shader.bind()
+            
+        if props.show_normal_overlay:
+            normals.draw(props, shader, bpy.context)
+            shader.bind()
 
 
         if props.show_uv_id:
@@ -1189,6 +1197,7 @@ def unregister():
     offscreen.free()
     padding.clear()
     stretch.clear()
+    normals.clear()
 
     if _obj_cache is not None: _obj_cache.clear()
     if _isect_self_cache is not None: _isect_self_cache.clear()

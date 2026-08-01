@@ -254,6 +254,7 @@ if "bpy" in locals():
     importlib.reload(stretch_checker)
     importlib.reload(stretch_heatmap)
     importlib.reload(stretch)
+    importlib.reload(normals)
     importlib.reload(props)
     importlib.reload(ops)
     importlib.reload(draw)
@@ -266,6 +267,7 @@ else:
     from . import stretch_checker
     from . import stretch_heatmap
     from . import stretch
+    from . import normals
     from . import props
     from . import ops
     from . import draw
