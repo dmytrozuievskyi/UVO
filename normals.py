@@ -57,6 +57,37 @@ def get_arrow_geometry(origin, vector, is_positive):
         hollow_lines = [ p1, p2, p2, p3, p3, p1 ]
         return line_coords, [], hollow_lines
 
+def get_circle_geometry(center, radius, is_filled):
+    cx, cy = center
+    segs = 16
+    pts = []
+    for i in range(segs):
+        ang = (i / segs) * math.pi * 2
+        pts.append((cx + math.cos(ang)*radius, cy + math.sin(ang)*radius, 0.0))
+        
+    if is_filled:
+        tris = []
+        c3 = (cx, cy, 0.0)
+        for i in range(segs):
+            tris.extend([c3, pts[i], pts[(i+1)%segs]])
+        return [], tris, []
+    else:
+        lines = []
+        for i in range(segs):
+            lines.extend([pts[i], pts[(i+1)%segs]])
+        return [], [], lines
+
+def _add_circle(center, radius, is_filled, color, out_lines, out_lines_colors, out_tris, out_tris_colors):
+    lc, tc, hl = get_circle_geometry(center, radius, is_filled)
+    for _ in range(len(hl) // 2):
+        out_lines.extend(hl[-2:])
+        out_lines_colors.extend((color, color))
+        del hl[-2:]
+    for _ in range(len(tc) // 3):
+        out_tris.extend(tc[-3:])
+        out_tris_colors.extend((color, color, color))
+        del tc[-3:]
+
 def _add_arrow(origin, vector, is_positive, color, out_lines, out_lines_colors, out_tris, out_tris_colors):
     lc, tc, hl = get_arrow_geometry(origin, vector, is_positive)
     
@@ -103,18 +134,31 @@ def _rebuild_batches(props):
         for island_groups in obj_groups:
             for g in island_groups:
                 center = g['center']
-                vx, vy, vz = g['vector']
+                nx, ny, nz = g['normal']
+                px_u, px_v = g['proj_x']
+                py_u, py_v = g['proj_y']
+                pz_u, pz_v = g['proj_z']
                 
-                if props.normal_filter_x and abs(vx) > 1e-4:
-                    _add_arrow(center, (vx * max_len, 0.0), vx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-                if props.normal_filter_y and abs(vy) > 1e-4:
-                    _add_arrow(center, (0.0, vy * max_len), vy > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-                if props.normal_filter_z and abs(vz) > 1e-4:
-                    z_len = abs(vz) * max_len
-                    # Diagonal for Z
-                    dz = z_len * 0.7071
-                    # Vector is diagonal. We point it top-right for +Z, bottom-left for -Z
-                    _add_arrow(center, (dz if vz > 0 else -dz, dz if vz > 0 else -dz), vz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                # Threshold for being "aligned" with the axis (approx 18 degrees)
+                align_thresh = 0.95
+                
+                if props.normal_filter_x:
+                    if abs(nx) > align_thresh:
+                        _add_circle(center, max_len * 0.14, nx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                    elif abs(px_u) > 1e-4 or abs(px_v) > 1e-4:
+                        _add_arrow(center, (px_u * max_len, px_v * max_len), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        
+                if props.normal_filter_y:
+                    if abs(ny) > align_thresh:
+                        _add_circle(center, max_len * 0.14, ny > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                    elif abs(py_u) > 1e-4 or abs(py_v) > 1e-4:
+                        _add_arrow(center, (py_u * max_len, py_v * max_len), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        
+                if props.normal_filter_z:
+                    if abs(nz) > align_thresh:
+                        _add_circle(center, max_len * 0.14, nz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                    elif abs(pz_u) > 1e-4 or abs(pz_v) > 1e-4:
+                        _add_arrow(center, (pz_u * max_len, pz_v * max_len), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
 
     try:
         shader = gpu.shader.from_builtin('SMOOTH_COLOR')

@@ -302,6 +302,8 @@ def _serialize_islands_for_worker(tiled):
                     'surface_area': isle.surface_area,
                     'face_normals': isle.face_normals,
                     'face_areas':   isle.face_areas,
+                    'grad_u':       isle.grad_u,
+                    'grad_v':       isle.grad_v,
                     'aabb':         isle.aabb,
                 })
             if pkg:
@@ -366,6 +368,16 @@ def _dispatch_worker_job(props):
                 obj_entry['tex_h']        = cache.get('tex_h', 1024.0)
                 obj_entry['target_texel'] = cache.get('target_texel', 0.0)
 
+    if do_normals:
+        for obj_entry in objects:
+            cache = _obj_cache.get(obj_entry['name'])
+            if cache and 'matrix_world' in cache:
+                obj_entry['matrix_world'] = cache['matrix_world']
+            else:
+                obj = bpy.context.scene.objects.get(obj_entry['name'])
+                if obj:
+                    obj_entry['matrix_world'] = [list(r) for r in obj.matrix_world]
+
     job_id = pkg.next_job_id()
 
     if do_classify:
@@ -382,10 +394,11 @@ def _dispatch_worker_job(props):
         'type':        'compute',
         'objects':     objects,
         'tiled':       tiled,
-        'cross_prev':  _isect_cross_cache,
+        'cross_prev':  cross_prev,
         'do_classify': do_classify,
         'do_stretch':  do_stretch,
         'do_normals':  do_normals,
+        'normals_space': props.normal_overlay_space,
         'normal_threshold': props.normal_overlay_threshold,
     })
     

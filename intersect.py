@@ -15,7 +15,7 @@ UV_DECIMAL = 3
 class Island:
     __slots__ = ('tris', 'aabb', 'uv_key', 'local_key', 'ref_a', 'ref_b', 'color', 'object_name',
                  'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area',
-                 'face_normals', 'face_areas')
+                 'face_normals', 'face_areas', 'grad_u', 'grad_v')
 
     def __init__(self, tris, color, object_name=''):
         self.tris          = tris
@@ -31,6 +31,8 @@ class Island:
         self.surface_area  = 0.0
         self.face_normals  = []
         self.face_areas    = []
+        self.grad_u        = []
+        self.grad_v        = []
 
         if tris:
             all_u = [v[0] for t in tris for v in t]
@@ -147,45 +149,49 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
         island_faces = [bm_copy.faces[i] for i in face_index_set]
         
         ta = time.perf_counter()
-        tris, jacobians, uv_area, surf_area, face_normals, face_areas = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
+        f_tris, f_jacs, uv_area, surf_area, f_norms, f_areas, g_u, g_v = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
+        if not f_tris:
+            continue
+            
+        isle = Island(f_tris, col, object_name)
+        isle.jacobians = f_jacs
+        isle.uv_area = uv_area
+        isle.surface_area = surf_area
+        isle.face_normals = f_norms
+        isle.face_areas = f_areas
+        isle.grad_u = g_u
+        isle.grad_v = g_v
+            
         tb = time.perf_counter()
         t_fan += (tb - ta)
-
-        if tris:
-            isle               = Island(tris, col, object_name)
-            isle.jacobians     = jacobians
-            isle.uv_area       = uv_area
-            isle.surface_area  = surf_area
-            isle.face_normals  = face_normals
-            isle.face_areas    = face_areas
-            
-            tc = time.perf_counter()
-            uv_key = _island_uv_key(island_faces, uv_layer)
-            isle.uv_key = uv_key
-            
-            isle.local_key = (len(tris), round(surf_area, 5), len(uv_key), round(uv_area, 5))
-            ref_a = tris[0][0] if tris else (0.0, 0.0)
-            ref_b = ref_a
-            for t in tris:
-                for v in t:
-                    if (v[0]-ref_a[0])**2 + (v[1]-ref_a[1])**2 > 1e-8:
-                        ref_b = v
-                        break
-                if ref_b != ref_a:
+        
+        tc = time.perf_counter()
+        uv_key = _island_uv_key(island_faces, uv_layer)
+        isle.uv_key = uv_key
+        
+        isle.local_key = (len(f_tris), round(surf_area, 5), len(uv_key), round(uv_area, 5))
+        ref_a = f_tris[0][0] if f_tris else (0.0, 0.0)
+        ref_b = ref_a
+        for t in f_tris:
+            for v in t:
+                if (v[0]-ref_a[0])**2 + (v[1]-ref_a[1])**2 > 1e-8:
+                    ref_b = v
                     break
-            isle.ref_a = ref_a
-            isle.ref_b = ref_b
+            if ref_b != ref_a:
+                break
+        isle.ref_a = ref_a
+        isle.ref_b = ref_b
             
-            td = time.perf_counter()
-            t_key += (td - tc)
-            
-            isle.boundary_segs = _extract_boundary_segs(
-                island_faces, face_index_set, uv_layer, uv_adj
-            )
-            te = time.perf_counter()
-            t_bound += (te - td)
-            
-            islands.append(isle)
+        td = time.perf_counter()
+        t_key += (td - tc)
+        
+        isle.boundary_segs = _extract_boundary_segs(
+            island_faces, face_index_set, uv_layer, uv_adj
+        )
+        te = time.perf_counter()
+        t_bound += (te - td)
+        
+        islands.append(isle)
 
     utils_mod.log("timing_extract", f"fan: {t_fan*1000:.1f}ms, key: {t_key*1000:.1f}ms, bound: {t_bound*1000:.1f}ms")
     return islands
@@ -196,6 +202,8 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
     jacobians = []
     face_normals = []
     face_areas = []
+    grad_u_list = []
+    grad_v_list = []
     total_uv_area = 0.0
     total_surf_area = 0.0
 
@@ -253,6 +261,8 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
 
             if abs(det_uv) < 1e-12:
                 jacobians.append(identity_j)
+                grad_u_list.append((0.0, 0.0, 0.0))
+                grad_v_list.append((0.0, 0.0, 0.0))
                 continue
 
             inv_det = 1.0 / det_uv
@@ -266,12 +276,16 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
             D = E * G - F * F
             if D < 1e-12:
                 jacobians.append(identity_j)
+                grad_u_list.append((0.0, 0.0, 0.0))
+                grad_v_list.append((0.0, 0.0, 0.0))
                 continue
 
             s = math.sqrt(D)
             t_sq = E + G + 2 * s
             if t_sq < 1e-12:
                 jacobians.append(identity_j)
+                grad_u_list.append((0.0, 0.0, 0.0))
+                grad_v_list.append((0.0, 0.0, 0.0))
                 continue
 
             t = math.sqrt(t_sq)
@@ -280,8 +294,22 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
             M10 = F / t
             M11 = (G + s) / t
             jacobians.append((M00, M01, M10, M11))
+            
+            # Local gradients for UV axis projection
+            # Tu and Tv here are 3D tangents mapping UV -> 3D.
+            # We want grad_u and grad_v which are the dual basis vectors in the face plane.
+            N_unscaled = Tu.cross(Tv)
+            det_3d = Tu.dot(Tv.cross(N_unscaled))
+            if abs(det_3d) > 1e-12:
+                gu = Tv.cross(N_unscaled) / det_3d
+                gv = N_unscaled.cross(Tu) / det_3d
+                grad_u_list.append((gu.x, gu.y, gu.z))
+                grad_v_list.append((gv.x, gv.y, gv.z))
+            else:
+                grad_u_list.append((0.0, 0.0, 0.0))
+                grad_v_list.append((0.0, 0.0, 0.0))
 
-    return tris, jacobians, total_uv_area, total_surf_area, face_normals, face_areas
+    return tris, jacobians, total_uv_area, total_surf_area, face_normals, face_areas, grad_u_list, grad_v_list
 
 
 def _island_uv_key(faces, uv_layer):

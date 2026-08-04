@@ -86,6 +86,8 @@ def _deserialize_island(d, ix):
     isle.surface_area  = d.get('surface_area', 0.0)
     isle.face_normals  = d.get('face_normals', [])
     isle.face_areas    = d.get('face_areas', [])
+    isle.grad_u        = d.get('grad_u', [])
+    isle.grad_v        = d.get('grad_v', [])
     if 'aabb' in d:
         isle.aabb = d['aabb']
     return isle
@@ -98,7 +100,8 @@ _stretch_cache     = {}  # {name: [(cache_key, result), ...]}  per-island stretc
 _stretch_local_cache = {}  # {name: {local_cache_key: {'ref_a': A, 'ref_b': B, 'result': ...}}}
 _normals_cache     = {}  # {name: {'hash': int, 'threshold': str, 'result': list}}
 
-def _run_normals(objects, job_id, threshold):
+def _run_normals(objects, threshold, normals_space, job_id):
+    """Group normals per island based on threshold. Projects 3D axes onto UV space."""
     results = {}
     total_groups = 0
     
@@ -131,55 +134,170 @@ def _run_normals(objects, job_id, threshold):
             if not isle.face_normals:
                 continue
                 
-            groups = {}  # ref_idx -> {'sum_nx': 0, 'sum_ny': 0, 'sum_nz': 0, 'sum_u': 0, 'sum_v': 0, 'count': 0}
-            
+            v_to_t = {}
+            for i, tri in enumerate(isle.tris):
+                for u, v in tri:
+                    k = (round(u, 5), round(v, 5))
+                    if k not in v_to_t: v_to_t[k] = []
+                    v_to_t[k].append(i)
+                    
+            face_best_idx = []
             for i, fn in enumerate(isle.face_normals):
                 area = isle.face_areas[i]
                 if area < 1e-8:
+                    face_best_idx.append(-1)
                     continue
-                    
-                # fn is unnormalized, length is 2*area. So actual normal is fn / (2*area)
                 l = math.sqrt(fn[0]**2 + fn[1]**2 + fn[2]**2)
                 if l < 1e-8:
+                    face_best_idx.append(-1)
                     continue
                 nx, ny, nz = fn[0]/l, fn[1]/l, fn[2]/l
-                
                 best_idx = 0
                 if threshold != 'AVERAGE':
                     best_dot = -2.0
                     for ridx, rd in enumerate(ref_dirs):
                         dot = nx*rd[0] + ny*rd[1] + nz*rd[2]
                         if dot > best_dot:
-                            best_dot = dot
-                            best_idx = ridx
-                            
-                if best_idx not in groups:
-                    groups[best_idx] = {'nx': 0, 'ny': 0, 'nz': 0, 'u': 0, 'v': 0, 'count': 0}
-                    
-                g = groups[best_idx]
-                g['nx'] += fn[0] * 0.5  # true area-weighted component
-                g['ny'] += fn[1] * 0.5
-                g['nz'] += fn[2] * 0.5
+                            best_dot, best_idx = dot, ridx
+                face_best_idx.append(best_idx)
                 
-                # UV center of the face
-                tri = isle.tris[i]
-                cu = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0
-                cv = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0
-                g['u'] += cu * area
-                g['v'] += cv * area
-                g['count'] += area
+            groups = {}
+            visited = set()
+            group_counter = 0
+            
+            for i in range(len(isle.face_normals)):
+                idx = face_best_idx[i]
+                if idx == -1 or i in visited:
+                    continue
+                
+                # Start new component
+                visited.add(i)
+                stack = [i]
+                
+                g = {'nx': 0, 'ny': 0, 'nz': 0, 
+                     'gux': 0, 'guy': 0, 'guz': 0,
+                     'gvx': 0, 'gvy': 0, 'gvz': 0,
+                     'u': 0, 'v': 0, 'count': 0,
+                     'best_idx': idx}
+                
+                while stack:
+                    curr = stack.pop()
+                    area = isle.face_areas[curr]
+                    fn = isle.face_normals[curr]
+                    gu = isle.grad_u[curr]
+                    gv = isle.grad_v[curr]
+                    
+                    g['nx'] += fn[0] * 0.5
+                    g['ny'] += fn[1] * 0.5
+                    g['nz'] += fn[2] * 0.5
+                    g['gux'] += gu[0] * area
+                    g['guy'] += gu[1] * area
+                    g['guz'] += gu[2] * area
+                    g['gvx'] += gv[0] * area
+                    g['gvy'] += gv[1] * area
+                    g['gvz'] += gv[2] * area
+                    
+                    tri = isle.tris[curr]
+                    g['u'] += (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0 * area
+                    g['v'] += (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0 * area
+                    g['count'] += area
+                    
+                    for u, v in tri:
+                        k = (round(u, 5), round(v, 5))
+                        for nbr in v_to_t.get(k, []):
+                            if nbr not in visited and face_best_idx[nbr] == idx:
+                                visited.add(nbr)
+                                stack.append(nbr)
+                                
+                groups[group_counter] = g
+                group_counter += 1
                 
             island_groups = []
-            total_island_area = isle.surface_area
-            if total_island_area < 1e-8:
-                total_island_area = 1.0
+            
+            # Setup transformation matrices if GLOBAL space is requested
+            ax_x, ax_y, ax_z = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+            use_global = (normals_space == 'GLOBAL') and ('matrix_world' in od)
+            if use_global:
+                mw = od['matrix_world']
+                # To transform global axes to local space for dotting with local gradient,
+                # we multiply by the inverse of the upper 3x3 of matrix_world.
+                # Compute inverse of upper 3x3
+                m00, m01, m02 = mw[0][0], mw[0][1], mw[0][2]
+                m10, m11, m12 = mw[1][0], mw[1][1], mw[1][2]
+                m20, m21, m22 = mw[2][0], mw[2][1], mw[2][2]
                 
+                det = m00*(m11*m22 - m12*m21) - m01*(m10*m22 - m12*m20) + m02*(m10*m21 - m11*m20)
+                if abs(det) > 1e-12:
+                    inv_det = 1.0 / det
+                    i00 = (m11*m22 - m12*m21) * inv_det
+                    i01 = (m02*m21 - m01*m22) * inv_det
+                    i02 = (m01*m12 - m02*m11) * inv_det
+                    
+                    i10 = (m12*m20 - m10*m22) * inv_det
+                    i11 = (m00*m22 - m02*m20) * inv_det
+                    i12 = (m02*m10 - m00*m12) * inv_det
+                    
+                    i20 = (m10*m21 - m11*m20) * inv_det
+                    i21 = (m01*m20 - m00*m21) * inv_det
+                    i22 = (m00*m11 - m01*m10) * inv_det
+                    
+                    ax_x = (i00, i10, i20)
+                    ax_y = (i01, i11, i21)
+                    ax_z = (i02, i12, i22)
+            
             for g in groups.values():
-                if g['count'] < 1e-8:
+                c = g['count']
+                if c < 1e-8:
                     continue
+                
+                # Average normal (local space)
+                if threshold != 'AVERAGE':
+                    # Snap to the exact reference direction for 90/45 modes
+                    nx, ny, nz = ref_dirs[g['best_idx']]
+                else:
+                    nx, ny, nz = g['nx']/c, g['ny']/c, g['nz']/c
+                    l = math.sqrt(nx*nx + ny*ny + nz*nz)
+                    if l > 1e-8:
+                        nx, ny, nz = nx/l, ny/l, nz/l
+                    
+                # Transform normal to global if requested
+                if use_global:
+                    mw = od['matrix_world']
+                    gnx = mw[0][0]*nx + mw[0][1]*ny + mw[0][2]*nz
+                    gny = mw[1][0]*nx + mw[1][1]*ny + mw[1][2]*nz
+                    gnz = mw[2][0]*nx + mw[2][1]*ny + mw[2][2]*nz
+                    gl = math.sqrt(gnx*gnx + gny*gny + gnz*gnz)
+                    if gl > 1e-8:
+                        nx, ny, nz = gnx/gl, gny/gl, gnz/gl
+                
+                # Average local gradients
+                gux, guy, guz = g['gux']/c, g['guy']/c, g['guz']/c
+                gvx, gvy, gvz = g['gvx']/c, g['gvy']/c, g['gvz']/c
+                
+                # Project axes onto UV using dot product with gradients
+                px_u = ax_x[0]*gux + ax_x[1]*guy + ax_x[2]*guz
+                px_v = ax_x[0]*gvx + ax_x[1]*gvy + ax_x[2]*gvz
+                
+                py_u = ax_y[0]*gux + ax_y[1]*guy + ax_y[2]*guz
+                py_v = ax_y[0]*gvx + ax_y[1]*gvy + ax_y[2]*gvz
+                
+                pz_u = ax_z[0]*gux + ax_z[1]*guy + ax_z[2]*guz
+                pz_v = ax_z[0]*gvx + ax_z[1]*gvy + ax_z[2]*gvz
+                
+                # Normalize the UV directions and scale by projection length (sqrt(1 - N^2))
+                def _normalize_proj(u, v, n_comp):
+                    ll = math.hypot(u, v)
+                    if ll < 1e-8:
+                        return (0.0, 0.0)
+                    scale = math.sqrt(max(0.0, 1.0 - n_comp*n_comp))
+                    return ((u/ll) * scale, (v/ll) * scale)
+                    
                 island_groups.append({
-                    'center': (g['u'] / g['count'], g['v'] / g['count']),
-                    'vector': (g['nx'] / g['count'], g['ny'] / g['count'], g['nz'] / g['count'])
+                    'center': (g['u'] / c, g['v'] / c),
+                    'normal': (nx, ny, nz),
+                    'proj_x': _normalize_proj(px_u, px_v, nx),
+                    'proj_y': _normalize_proj(py_u, py_v, ny),
+                    'proj_z': _normalize_proj(pz_u, pz_v, nz),
                 })
                 
             obj_result.append(island_groups)
@@ -505,7 +623,7 @@ def _handle_compute(job, ix):
         
     # Normals
     if job.get('do_normals', False):
-        result['normal_results'] = _run_normals(objects, job_id, job.get('normal_threshold', 'AVERAGE'))
+        result['normal_results'] = _run_normals(objects, job.get('normal_threshold', 'AVERAGE'), job.get('normals_space', 'LOCAL'), job_id)
 
     _wlog(f"job {job_id}: COMPLETE {(time.perf_counter()-t0)*1000:.0f}ms total")
     return result
