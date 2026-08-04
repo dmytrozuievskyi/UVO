@@ -106,11 +106,10 @@ def _run_normals(objects, threshold, normals_space, job_id):
     total_groups = 0
     
     # 90 = 6 dirs, AVERAGE = 1 dir
-    ref_dirs = []
-    if threshold == '90':
-        ref_dirs = [
-            (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)
-        ]
+    # Always use cardinal dirs for internal bucketing even in AVERAGE mode
+    ref_dirs = [
+        (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)
+    ]
     for od in objects:
         name = od['name']
         h = od['hash']
@@ -145,12 +144,11 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     continue
                 nx, ny, nz = fn[0]/l, fn[1]/l, fn[2]/l
                 best_idx = 0
-                if threshold != 'AVERAGE':
-                    best_dot = -2.0
-                    for ridx, rd in enumerate(ref_dirs):
-                        dot = nx*rd[0] + ny*rd[1] + nz*rd[2]
-                        if dot > best_dot:
-                            best_dot, best_idx = dot, ridx
+                best_dot = -2.0
+                for ridx, rd in enumerate(ref_dirs):
+                    dot = nx*rd[0] + ny*rd[1] + nz*rd[2]
+                    if dot > best_dot:
+                        best_dot, best_idx = dot, ridx
                 face_best_idx.append(best_idx)
                 
             groups = {}
@@ -261,60 +259,72 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     tnx, tny, tnz = (0.0, 0.0, 0.0)
                 g['true_normal'] = (tnx, tny, tnz)
 
-                if threshold != 'AVERAGE':
-                    # Calculate snap fidelity
-                    snx, sny, snz = ref_dirs[g['best_idx']]
-                    g['snap_fidelity'] = tnx*snx + tny*sny + tnz*snz
-                else:
-                    g['snap_fidelity'] = 1.0
+                # Calculate snap fidelity against the bucket it fell into
+                snx, sny, snz = ref_dirs[g['best_idx']]
+                g['snap_fidelity'] = tnx*snx + tny*sny + tnz*snz
 
             # Sort groups by area descending
             sorted_groups = sorted(groups.values(), key=lambda x: x['count'], reverse=True)
             
             kept_groups = []
-            if threshold == '90': 
-                # Apply advanced filtering for 90 degree mode
-                for g in sorted_groups:
-                    c = g['count']
-                    if c < 1e-8:
-                        continue
+            
+            # Apply advanced filtering for all modes
+            for g in sorted_groups:
+                c = g['count']
+                if c < 1e-8:
+                    continue
+                
+                area_frac = c / total_area
+                
+                if area_frac >= 0.10:
+                    kept_groups.append(g)
+                    continue
                     
-                    area_frac = c / total_area
+                if g['snap_fidelity'] < 0.7:
+                    continue
                     
-                    if area_frac >= 0.10:
-                        kept_groups.append(g)
-                        continue
+                is_redundant = False
+                tnx, tny, tnz = g['true_normal']
+                for kg in kept_groups:
+                    knx, kny, knz = kg['true_normal']
+                    dot = abs(tnx*knx + tny*kny + tnz*knz)
+                    if dot > 0.7:
+                        is_redundant = True
+                        break
                         
-                    if g['snap_fidelity'] < 0.7:
-                        continue
-                        
-                    is_redundant = False
-                    tnx, tny, tnz = g['true_normal']
-                    for kg in kept_groups:
-                        knx, kny, knz = kg['true_normal']
-                        dot = abs(tnx*knx + tny*kny + tnz*knz)
-                        if dot > 0.7:
-                            is_redundant = True
-                            break
-                            
-                    if not is_redundant:
-                        kept_groups.append(g)
-            else:
-                # Keep all valid groups for AVERAGE mode
-                kept_groups = [g for g in sorted_groups if g['count'] >= 1e-8]
+                if not is_redundant:
+                    kept_groups.append(g)
+                    
+            if threshold == 'NONE': # Average mode
+                # Pick the single best representative
+                if kept_groups:
+                    island_center_u = sum(g['u'] for g in kept_groups) / sum(g['count'] for g in kept_groups)
+                    island_center_v = sum(g['v'] for g in kept_groups) / sum(g['count'] for g in kept_groups)
+                    
+                    best_score = -1.0
+                    best_group = None
+                    for g in kept_groups:
+                        c = g['count']
+                        area_w = c / total_area
+                        gu, gv = g['u'] / c, g['v'] / c
+                        dist = math.hypot(gu - island_center_u, gv - island_center_v)
+                        centrality_w = 1.0 / (1.0 + dist * 10.0)
+                        score = area_w * centrality_w
+                        if score > best_score:
+                            best_score = score
+                            best_group = g
+                    
+                    kept_groups = [best_group]
             
             for g in kept_groups:
                 c = g['count']
                 
                 # Average normal (local space)
-                if threshold != 'AVERAGE':
-                    # Snap to the exact reference direction for 90/45 modes
+                if threshold == '90':
+                    # Snap to the exact reference direction for 90 mode
                     nx, ny, nz = ref_dirs[g['best_idx']]
                 else:
-                    nx, ny, nz = g['nx']/c, g['ny']/c, g['nz']/c
-                    l = math.sqrt(nx*nx + ny*ny + nz*nz)
-                    if l > 1e-8:
-                        nx, ny, nz = nx/l, ny/l, nz/l
+                    nx, ny, nz = g['true_normal']
                     
                 # Transform normal to global if requested
                 if use_global:
