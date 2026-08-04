@@ -6,7 +6,7 @@ from gpu_extras.batch import batch_for_shader
 _batch_lines = None
 _batch_tris = None
 
-def get_arrow_geometry(origin, vector, is_positive):
+def get_arrow_geometry(origin, vector, is_positive, max_len):
     ox, oy = origin
     vx, vy = vector
     
@@ -21,8 +21,9 @@ def get_arrow_geometry(origin, vector, is_positive):
     
     line_coords = [ (ox, oy, 0.0), (end_x, end_y, 0.0) ]
     
-    head_len = 0.004
-    head_half_width = 0.002
+    # max_len is 45px, so 10px is (10.0/45.0) of max_len
+    head_len = max_len * (10.0 / 45.0)
+    head_half_width = head_len * 0.5
     
     if head_len > length * 0.5:
         ratio = (length * 0.5) / head_len
@@ -88,8 +89,8 @@ def _add_circle(center, radius, is_filled, color, out_lines, out_lines_colors, o
         out_tris_colors.extend((color, color, color))
         del tc[-3:]
 
-def _add_arrow(origin, vector, is_positive, color, out_lines, out_lines_colors, out_tris, out_tris_colors):
-    lc, tc, hl = get_arrow_geometry(origin, vector, is_positive)
+def _add_arrow(origin, vector, is_positive, color, out_lines, out_lines_colors, out_tris, out_tris_colors, max_len):
+    lc, tc, hl = get_arrow_geometry(origin, vector, is_positive, max_len)
     
     for _ in range(len(lc) // 2):
         out_lines.extend(lc[-2:])
@@ -115,20 +116,34 @@ def rebuild_from_worker_data(results):
     _normal_data = results
     _cached_filter_state = None  # Force rebuild on next draw
 
-def _rebuild_batches(props):
-    global _batch_lines, _batch_tris, _normal_data, _cached_filter_state
+_cached_zoom = 0.0
+
+def _rebuild_batches(props, context):
+    global _batch_lines, _batch_tris, _normal_data, _cached_filter_state, _cached_zoom
+    
+    from . import stretch_checker
+    zoom = stretch_checker.get_zoom(context)
     
     current_filters = (props.normal_filter_x, props.normal_filter_y, props.normal_filter_z)
-    if _cached_filter_state == current_filters:
+    if _cached_filter_state == current_filters and abs(_cached_zoom - zoom) < (zoom * 0.01):
         return
         
     _cached_filter_state = current_filters
+    _cached_zoom = zoom
     
     line_coords, line_colors = [], []
     tri_coords, tri_colors = [], []
     
-    max_len = 0.04  # Max length representing 1.0 component
+    # Target size: roughly 30 pixels on screen.
+    # zoom = pixels_per_uv / 256.0
+    # pixels_per_uv = zoom * 256.0
+    # max_len in UV units = target_pixels / pixels_per_uv
+    pixels_per_uv = zoom * 256.0
+    max_len = 45.0 / max(1.0, pixels_per_uv)
+    
     diag = max_len * 0.7071  # sin(45) and cos(45)
+    
+    circle_radius = max_len * (10.0 / 45.0)  # 10px radius = 20px diameter
     
     for obj_name, obj_groups in _normal_data.items():
         for island_groups in obj_groups:
@@ -144,21 +159,21 @@ def _rebuild_batches(props):
                 
                 if props.normal_filter_x:
                     if abs(nx) > align_thresh:
-                        _add_circle(center, max_len * 0.14, nx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_circle(center, circle_radius, nx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
                     elif abs(px_u) > 1e-4 or abs(px_v) > 1e-4:
-                        _add_arrow(center, (px_u * max_len, px_v * max_len), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_arrow(center, (px_u * max_len, px_v * max_len), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
                         
                 if props.normal_filter_y:
                     if abs(ny) > align_thresh:
-                        _add_circle(center, max_len * 0.14, ny > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_circle(center, circle_radius, ny > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
                     elif abs(py_u) > 1e-4 or abs(py_v) > 1e-4:
-                        _add_arrow(center, (py_u * max_len, py_v * max_len), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_arrow(center, (py_u * max_len, py_v * max_len), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
                         
                 if props.normal_filter_z:
                     if abs(nz) > align_thresh:
-                        _add_circle(center, max_len * 0.14, nz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_circle(center, circle_radius, nz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
                     elif abs(pz_u) > 1e-4 or abs(pz_v) > 1e-4:
-                        _add_arrow(center, (pz_u * max_len, pz_v * max_len), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_arrow(center, (pz_u * max_len, pz_v * max_len), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
 
     try:
         shader = gpu.shader.from_builtin('SMOOTH_COLOR')
@@ -176,7 +191,7 @@ def _rebuild_batches(props):
         _batch_tris = None
 
 def draw(props, shader, context):
-    _rebuild_batches(props)
+    _rebuild_batches(props, context)
     
     if _batch_lines:
         gpu.state.line_width_set(2.0)
