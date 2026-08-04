@@ -247,10 +247,72 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     ax_y = (i01, i11, i21)
                     ax_z = (i02, i12, i22)
             
+            # Calculate total area
+            total_area = sum(g['count'] for g in groups.values())
+            if total_area < 1e-8:
+                continue
+
+            # Compute true normals and snap fidelity for all groups
             for g in groups.values():
                 c = g['count']
                 if c < 1e-8:
+                    g['true_normal'] = (0.0, 0.0, 0.0)
+                    g['snap_fidelity'] = 0.0
                     continue
+                
+                # True average normal
+                tnx, tny, tnz = g['nx']/c, g['ny']/c, g['nz']/c
+                l = math.sqrt(tnx*tnx + tny*tny + tnz*tnz)
+                if l > 1e-8:
+                    tnx, tny, tnz = tnx/l, tny/l, tnz/l
+                else:
+                    tnx, tny, tnz = (0.0, 0.0, 0.0)
+                g['true_normal'] = (tnx, tny, tnz)
+
+                if threshold != 'AVERAGE':
+                    # Calculate snap fidelity
+                    snx, sny, snz = ref_dirs[g['best_idx']]
+                    g['snap_fidelity'] = tnx*snx + tny*sny + tnz*snz
+                else:
+                    g['snap_fidelity'] = 1.0
+
+            # Sort groups by area descending
+            sorted_groups = sorted(groups.values(), key=lambda x: x['count'], reverse=True)
+            
+            kept_groups = []
+            if threshold == '90': 
+                # Apply advanced filtering for 90 degree mode
+                for g in sorted_groups:
+                    c = g['count']
+                    if c < 1e-8:
+                        continue
+                    
+                    area_frac = c / total_area
+                    
+                    if area_frac >= 0.10:
+                        kept_groups.append(g)
+                        continue
+                        
+                    if g['snap_fidelity'] < 0.7:
+                        continue
+                        
+                    is_redundant = False
+                    tnx, tny, tnz = g['true_normal']
+                    for kg in kept_groups:
+                        knx, kny, knz = kg['true_normal']
+                        dot = abs(tnx*knx + tny*kny + tnz*knz)
+                        if dot > 0.7:
+                            is_redundant = True
+                            break
+                            
+                    if not is_redundant:
+                        kept_groups.append(g)
+            else:
+                # Keep all valid groups for 45 degree or AVERAGE mode
+                kept_groups = [g for g in sorted_groups if g['count'] >= 1e-8]
+            
+            for g in kept_groups:
+                c = g['count']
                 
                 # Average normal (local space)
                 if threshold != 'AVERAGE':
