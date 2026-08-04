@@ -178,10 +178,12 @@ def _run_normals(objects, threshold, normals_space, job_id):
                      'gux': 0, 'guy': 0, 'guz': 0,
                      'gvx': 0, 'gvy': 0, 'gvz': 0,
                      'u': 0, 'v': 0, 'count': 0,
-                     'best_idx': idx}
+                     'best_idx': idx,
+                     'tris': []}
                 
                 while stack:
                     curr = stack.pop()
+                    g['tris'].append(curr)
                     area = isle.face_areas[curr]
                     fn = isle.face_normals[curr]
                     gu = isle.grad_u[curr]
@@ -292,12 +294,111 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     scale = math.sqrt(max(0.0, 1.0 - n_comp*n_comp))
                     return ((u/ll) * scale, (v/ll) * scale)
                     
+                px_norm = _normalize_proj(px_u, px_v, nx)
+                py_norm = _normalize_proj(py_u, py_v, ny)
+                pz_norm = _normalize_proj(pz_u, pz_v, nz)
+                
+                # Axis slice snapping algorithm
+                cu, cv = g['u'] / c, g['v'] / c
+                final_center = (cu, cv)
+                
+                # Helper: Point in Triangle
+                def _point_in_tri(px, py, t):
+                    def sign(p1x, p1y, p2x, p2y, p3x, p3y):
+                        return (p1x - p3x)*(p2y - p3y) - (p2x - p3x)*(p1y - p3y)
+                    d1 = sign(px, py, t[0][0], t[0][1], t[1][0], t[1][1])
+                    d2 = sign(px, py, t[1][0], t[1][1], t[2][0], t[2][1])
+                    d3 = sign(px, py, t[2][0], t[2][1], t[0][0], t[0][1])
+                    has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+                    has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+                    return not (has_neg and has_pos)
+                    
+                is_inside = False
+                for curr in g['tris']:
+                    if _point_in_tri(cu, cv, isle.tris[curr]):
+                        is_inside = True
+                        break
+                        
+                if not is_inside:
+                    # Try slicing along all valid projection axes
+                    axes_to_try = []
+                    for p in (px_norm, py_norm, pz_norm):
+                        l = math.hypot(p[0], p[1])
+                        if l > 1e-4:
+                            axes_to_try.append((p[0]/l, p[1]/l))
+                    if not axes_to_try:
+                        axes_to_try.append((1.0, 0.0))
+                        
+                    all_mids = []
+                    
+                    for dx, dy in axes_to_try:
+                        # Collect boundary intersections in local space
+                        x_ints = {}
+                        y_ints = {}
+                        for curr in g['tris']:
+                            tri = isle.tris[curr]
+                            loc_tri = []
+                            for pt in tri:
+                                du, dv = pt[0] - cu, pt[1] - cv
+                                loc_tri.append((du*dx + dv*dy, -du*dy + dv*dx))
+                                
+                            for i in range(3):
+                                p1, p2 = loc_tri[i], loc_tri[(i+1)%3]
+                                if (p1[1] <= 0.0 < p2[1]) or (p2[1] <= 0.0 < p1[1]):
+                                    t = (0.0 - p1[1]) / (p2[1] - p1[1])
+                                    x = p1[0] + t * (p2[0] - p1[0])
+                                    k = round(x, 5)
+                                    if k not in x_ints: x_ints[k] = {'c': 0, 'v': x}
+                                    x_ints[k]['c'] += 1
+                                if (p1[0] <= 0.0 < p2[0]) or (p2[0] <= 0.0 < p1[0]):
+                                    t = (0.0 - p1[0]) / (p2[0] - p1[0])
+                                    y = p1[1] + t * (p2[1] - p1[1])
+                                    k = round(y, 5)
+                                    if k not in y_ints: y_ints[k] = {'c': 0, 'v': y}
+                                    y_ints[k]['c'] += 1
+                                    
+                        def get_midpoints(ints, is_horiz):
+                            bnd = sorted([d['v'] for k, d in ints.items() if d['c'] % 2 == 1])
+                            mids = []
+                            for i in range(0, len(bnd) - 1, 2):
+                                mid = (bnd[i] + bnd[i+1]) * 0.5
+                                if is_horiz: mids.append((mid, 0.0))
+                                else: mids.append((0.0, mid))
+                            return mids
+                            
+                        # Get midpoints from both horizontal and vertical slices
+                        mids = get_midpoints(x_ints, True) + get_midpoints(y_ints, False)
+                        
+                        # Transform all valid midpoints back to global space
+                        for m in mids:
+                            gx = cu + m[0]*dx - m[1]*dy
+                            gy = cv + m[0]*dy + m[1]*dx
+                            all_mids.append((gx, gy))
+                            
+                    if all_mids:
+                        best_dist = float('inf')
+                        for m in all_mids:
+                            dist = (m[0] - cu)**2 + (m[1] - cv)**2
+                            if dist < best_dist:
+                                best_dist = dist
+                                final_center = m
+                    else:
+                        best_dist = float('inf')
+                        for curr in g['tris']:
+                            tri = isle.tris[curr]
+                            cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0
+                            cy = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0
+                            dist = (cx - cu)**2 + (cy - cv)**2
+                            if dist < best_dist:
+                                best_dist = dist
+                                final_center = (cx, cy)
+                    
                 island_groups.append({
-                    'center': (g['u'] / c, g['v'] / c),
+                    'center': final_center,
                     'normal': (nx, ny, nz),
-                    'proj_x': _normalize_proj(px_u, px_v, nx),
-                    'proj_y': _normalize_proj(py_u, py_v, ny),
-                    'proj_z': _normalize_proj(pz_u, pz_v, nz),
+                    'proj_x': px_norm,
+                    'proj_y': py_norm,
+                    'proj_z': pz_norm,
                 })
                 
             obj_result.append(island_groups)
