@@ -105,7 +105,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
     results = {}
     total_groups = 0
     
-    # 90 = 6 dirs, AVERAGE = 1 dir
+    # Both 90 and AVERAGE modes use cardinal dirs for internal face bucketing
     # Always use cardinal dirs for internal bucketing even in AVERAGE mode
     ref_dirs = [
         (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)
@@ -319,11 +319,12 @@ def _run_normals(objects, threshold, normals_space, job_id):
             for g in kept_groups:
                 c = g['count']
                 
-                # Average normal (local space)
+                # Displayed normal (local space)
                 if threshold == '90':
-                    # Snap to the exact reference direction for 90 mode
+                    # Snap to the exact cardinal reference direction
                     nx, ny, nz = ref_dirs[g['best_idx']]
                 else:
+                    # Use the true average normal of the best representative group
                     nx, ny, nz = g['true_normal']
                     
                 # Transform normal to global if requested

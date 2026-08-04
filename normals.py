@@ -21,14 +21,14 @@ def get_arrow_geometry(origin, vector, is_positive, max_len):
     
     line_coords = [ (ox, oy, 0.0), (end_x, end_y, 0.0) ]
     
-    # max_len is 45px, so 10px is (10.0/45.0) of max_len
-    head_len = max_len * (10.0 / 45.0)
+    # max_len is 45px, so 10px is (12.0/48.0) of max_len
+    head_len = max_len * (12.0 / 48.0)
     head_half_width = head_len * 0.5
     
-    if head_len > length * 0.5:
-        ratio = (length * 0.5) / head_len
-        head_len *= ratio
-        head_half_width *= ratio
+    # Don't scale down the width of the arrowhead so they all look consistent.
+    # Just cap the length so it doesn't extend backwards past the origin.
+    if head_len > length:
+        head_len = length
     
     if is_positive:
         tip_x, tip_y = end_x, end_y
@@ -154,25 +154,25 @@ def _rebuild_batches(props, context):
                 py_u, py_v = g['proj_y']
                 pz_u, pz_v = g['proj_z']
                 
-                # Threshold for being "aligned" with the axis (approx 18 degrees)
-                align_thresh = 0.95
+                abs_n = [abs(nx), abs(ny), abs(nz)]
+                max_idx = abs_n.index(max(abs_n))
                 
                 if props.normal_filter_x:
-                    if abs(nx) > align_thresh:
+                    if max_idx == 0:
                         _add_circle(center, circle_radius, nx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-                    elif abs(px_u) > 1e-4 or abs(px_v) > 1e-4:
+                    if abs(px_u) > 1e-4 or abs(px_v) > 1e-4:
                         _add_arrow(center, (px_u * max_len, px_v * max_len), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
                         
                 if props.normal_filter_y:
-                    if abs(ny) > align_thresh:
+                    if max_idx == 1:
                         _add_circle(center, circle_radius, ny > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-                    elif abs(py_u) > 1e-4 or abs(py_v) > 1e-4:
+                    if abs(py_u) > 1e-4 or abs(py_v) > 1e-4:
                         _add_arrow(center, (py_u * max_len, py_v * max_len), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
                         
                 if props.normal_filter_z:
-                    if abs(nz) > align_thresh:
+                    if max_idx == 2:
                         _add_circle(center, circle_radius, nz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
-                    elif abs(pz_u) > 1e-4 or abs(pz_v) > 1e-4:
+                    if abs(pz_u) > 1e-4 or abs(pz_v) > 1e-4:
                         _add_arrow(center, (pz_u * max_len, pz_v * max_len), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
 
     try:
