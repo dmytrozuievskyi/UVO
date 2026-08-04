@@ -421,7 +421,6 @@ class UVIDProperties(bpy.types.PropertyGroup):
         name="Threshold",
         items=[
             ('90', "90°", "6 cardinal axes"),
-            ('45', "45°", "26 directional axes"),
             ('NONE', "Average", "Average normal of the entire island"),
         ],
         default='90',

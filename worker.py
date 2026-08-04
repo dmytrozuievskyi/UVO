@@ -105,20 +105,12 @@ def _run_normals(objects, threshold, normals_space, job_id):
     results = {}
     total_groups = 0
     
-    # 90 = 6 dirs, 45 = 26 dirs, AVERAGE = 1 dir
+    # 90 = 6 dirs, AVERAGE = 1 dir
     ref_dirs = []
     if threshold == '90':
         ref_dirs = [
             (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)
         ]
-    elif threshold == '45':
-        for x in (-1, 0, 1):
-            for y in (-1, 0, 1):
-                for z in (-1, 0, 1):
-                    if x == 0 and y == 0 and z == 0: continue
-                    l = math.sqrt(x*x + y*y + z*z)
-                    ref_dirs.append((x/l, y/l, z/l))
-                    
     for od in objects:
         name = od['name']
         h = od['hash']
@@ -308,7 +300,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     if not is_redundant:
                         kept_groups.append(g)
             else:
-                # Keep all valid groups for 45 degree or AVERAGE mode
+                # Keep all valid groups for AVERAGE mode
                 kept_groups = [g for g in sorted_groups if g['count'] >= 1e-8]
             
             for g in kept_groups:
