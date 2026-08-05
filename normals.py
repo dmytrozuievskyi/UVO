@@ -145,8 +145,19 @@ def _rebuild_batches(props, context):
     
     circle_radius = max_len * (10.0 / 45.0)  # 10px radius = 20px diameter
     
+    
+    min_island_px_area = 8100.0
+    ppuv_sq = pixels_per_uv * pixels_per_uv
+    
     for obj_name, obj_groups in _normal_data.items():
         for island_groups in obj_groups:
+            # Check if island occupies enough screen pixels
+            if not island_groups:
+                continue
+            island_uv_area = island_groups[0].get('island_uv_area', 1.0)
+            if island_uv_area * ppuv_sq < min_island_px_area:
+                continue
+                
             for g in island_groups:
                 center = g['center']
                 nx, ny, nz = g['normal']

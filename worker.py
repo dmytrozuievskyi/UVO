@@ -125,6 +125,13 @@ def _run_normals(objects, threshold, normals_space, job_id):
             if not isle.face_normals:
                 continue
                 
+            island_uv_area = 0.0
+            for tri in isle.tris:
+                u0, v0 = tri[0]
+                u1, v1 = tri[1]
+                u2, v2 = tri[2]
+                island_uv_area += abs((u1-u0)*(v2-v0) - (u2-u0)*(v1-v0)) * 0.5
+                
             v_to_t = {}
             for i, tri in enumerate(isle.tris):
                 for u, v in tri:
@@ -464,6 +471,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     'proj_x': px_norm,
                     'proj_y': py_norm,
                     'proj_z': pz_norm,
+                    'island_uv_area': island_uv_area,
                 })
                 
             obj_result.append(island_groups)
