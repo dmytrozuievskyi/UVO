@@ -477,6 +477,42 @@ def _run_normals(objects, threshold, normals_space, job_id):
                             if dist < best_dist:
                                 best_dist = dist
                                 final_center = (cx, cy)
+                                
+                # Calculate inverse covariance matrix for Gaussian splat blending
+                var_xx, var_yy, var_xy = 0.0, 0.0, 0.0
+                total_area_cov = 0.0
+                fcx, fcy = final_center
+                
+                for curr in g['tris']:
+                    tri = isle.tris[curr]
+                    # Use triangle center
+                    cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0
+                    cy = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0
+                    dx = cx - fcx
+                    dy = cy - fcy
+                    
+                    area = isle.face_areas[curr] if hasattr(isle, 'face_areas') and curr < len(isle.face_areas) else 1.0
+                    var_xx += dx*dx * area
+                    var_yy += dy*dy * area
+                    var_xy += dx*dy * area
+                    total_area_cov += area
+                    
+                if total_area_cov > 1e-8:
+                    var_xx /= total_area_cov
+                    var_yy /= total_area_cov
+                    var_xy /= total_area_cov
+                    
+                # Add tiny epsilon to prevent singularity on perfectly flat lines/points
+                var_xx += 1e-6
+                var_yy += 1e-6
+                
+                det = var_xx * var_yy - var_xy * var_xy
+                if abs(det) < 1e-12:
+                    inv_xx, inv_yy, inv_xy = 1.0, 1.0, 0.0
+                else:
+                    inv_xx = var_yy / det
+                    inv_yy = var_xx / det
+                    inv_xy = -var_xy / det
                     
                 island_groups.append({
                     '_best_idx': g['best_idx'],
@@ -486,6 +522,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     'proj_y': py_norm,
                     'proj_z': pz_norm,
                     'island_uv_area': island_uv_area,
+                    'inv_cov': (inv_xx, inv_yy, inv_xy),
                 })
                 
             fill_coords = []
@@ -517,6 +554,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
                         'center': g_info['center'],
                         'color': rgb,
                         'type': type_val,
+                        'inv_cov': g_info['inv_cov'],
                     })
                     
                 for tri in isle.tris:
@@ -530,7 +568,9 @@ def _run_normals(objects, threshold, normals_space, job_id):
                             for a in anchors:
                                 dx = u - a['center'][0]
                                 dy = v - a['center'][1]
-                                d_sq = dx*dx + dy*dy
+                                inv_xx, inv_yy, inv_xy = a['inv_cov']
+                                # Mahalanobis distance squared
+                                d_sq = inv_xx * dx * dx + 2.0 * inv_xy * dx * dy + inv_yy * dy * dy
                                 weights.append(1.0 / max(d_sq, 1e-8))
                                 
                             total_w = sum(weights)
