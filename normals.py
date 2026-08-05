@@ -119,7 +119,7 @@ def rebuild_from_worker_data(results):
 _cached_zoom = 0.0
 
 def _rebuild_batches(props, context):
-    global _batch_lines, _batch_tris, _normal_data, _cached_filter_state, _cached_zoom
+    global _batch_lines, _batch_tris, _batch_fill, _normal_data, _cached_filter_state, _cached_zoom
     
     from . import stretch_checker
     zoom = stretch_checker.get_zoom(context)
@@ -133,6 +133,7 @@ def _rebuild_batches(props, context):
     
     line_coords, line_colors = [], []
     tri_coords, tri_colors = [], []
+    fill_coords, fill_colors = [], []
     
     # Target size: roughly 30 pixels on screen.
     # zoom = pixels_per_uv / 256.0
@@ -149,14 +150,19 @@ def _rebuild_batches(props, context):
     min_island_px_area = 8100.0
     ppuv_sq = pixels_per_uv * pixels_per_uv
     
-    for obj_name, obj_groups in _normal_data.items():
-        for island_groups in obj_groups:
-            # Check if island occupies enough screen pixels
+    for obj_name, obj_results in _normal_data.items():
+        for res in obj_results:
+            island_groups = res['groups']
             if not island_groups:
                 continue
+                
             island_uv_area = island_groups[0].get('island_uv_area', 1.0)
             if island_uv_area * ppuv_sq < min_island_px_area:
                 continue
+                
+            if res.get('fill_coords'):
+                fill_coords.extend(res['fill_coords'])
+                fill_colors.extend(res['fill_colors'])
                 
             for g in island_groups:
                 center = g['center']
@@ -200,9 +206,20 @@ def _rebuild_batches(props, context):
         _batch_tris = batch_for_shader(shader, 'TRIS', {"pos": tri_coords, "color": tri_colors})
     else:
         _batch_tris = None
+        
+    from . import stretch_heatmap
+    if fill_coords:
+        _batch_fill = stretch_heatmap.build_batch_from_precomputed(fill_coords, fill_colors)
+    else:
+        _batch_fill = None
 
 def draw(props, shader, context):
     _rebuild_batches(props, context)
+    
+    if _batch_fill:
+        from . import stretch_heatmap
+        stretch_heatmap.draw(_batch_fill, opacity=1.0)
+        shader.bind()
     
     if _batch_lines:
         gpu.state.line_width_set(2.0)
@@ -212,8 +229,9 @@ def draw(props, shader, context):
         _batch_tris.draw(shader)
 
 def clear():
-    global _batch_lines, _batch_tris, _normal_data, _cached_filter_state
+    global _batch_lines, _batch_tris, _batch_fill, _normal_data, _cached_filter_state
     _batch_lines = None
     _batch_tris = None
+    _batch_fill = None
     _normal_data = {}
     _cached_filter_state = None

@@ -110,6 +110,18 @@ def _run_normals(objects, threshold, normals_space, job_id):
     ref_dirs = [
         (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)
     ]
+    
+    AXIS_COLORS = {
+        0: (1.0, 0.0, 0.0),  # +X red
+        1: (1.0, 0.0, 0.0),  # -X red
+        2: (0.0, 1.0, 0.0),  # +Y green
+        3: (0.0, 1.0, 0.0),  # -Y green
+        4: (0.0, 0.5, 1.0),  # +Z blue
+        5: (0.0, 0.5, 1.0),  # -Z blue
+    }
+    FILL_ALPHA_POS = 0.20
+    FILL_ALPHA_NEG = 0.12
+
     for od in objects:
         name = od['name']
         h = od['hash']
@@ -283,6 +295,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
                 
                 area_frac = c / total_area
                 
+                # kept_groups.append(g)
                 if area_frac >= 0.10:
                     kept_groups.append(g)
                     continue
@@ -466,6 +479,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
                                 final_center = (cx, cy)
                     
                 island_groups.append({
+                    '_best_idx': g['best_idx'],
                     'center': final_center,
                     'normal': (nx, ny, nz),
                     'proj_x': px_norm,
@@ -474,11 +488,67 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     'island_uv_area': island_uv_area,
                 })
                 
-            obj_result.append(island_groups)
+            fill_coords = []
+            fill_colors = []
+            
+            if threshold == 'NONE' and island_groups:
+                # Solid fill for average mode
+                group = island_groups[0]
+                ref_idx = group['_best_idx']
+                rgb = AXIS_COLORS[ref_idx]
+                alpha = FILL_ALPHA_POS if ref_idx % 2 == 0 else FILL_ALPHA_NEG
+                color = (rgb[0], rgb[1], rgb[2], alpha)
+                
+                for tri in isle.tris:
+                    for u, v in tri:
+                        fill_coords.append((u, v, 0.0))
+                        fill_colors.append(color)
+            elif island_groups:
+                # Radial gradient fill for 90 degree mode
+                anchors = []
+                for g_info in island_groups:
+                    ref_idx = g_info.get('_best_idx', 0)
+                    rgb = AXIS_COLORS[ref_idx]
+                    alpha = FILL_ALPHA_POS if ref_idx % 2 == 0 else FILL_ALPHA_NEG
+                    anchors.append({
+                        'center': g_info['center'],
+                        'color': rgb,
+                        'alpha': alpha,
+                    })
+                    
+                for tri in isle.tris:
+                    for u, v in tri:
+                        if len(anchors) == 1:
+                            c = anchors[0]
+                            fill_colors.append((*c['color'], c['alpha']))
+                        else:
+                            weights = []
+                            for a in anchors:
+                                dx = u - a['center'][0]
+                                dy = v - a['center'][1]
+                                d_sq = dx*dx + dy*dy
+                                weights.append(1.0 / max(d_sq, 1e-8))
+                                
+                            total_w = sum(weights)
+                            r, g, b, a = 0.0, 0.0, 0.0, 0.0
+                            for w, anchor in zip(weights, anchors):
+                                nw = w / total_w
+                                r += nw * anchor['color'][0]
+                                g += nw * anchor['color'][1]
+                                b += nw * anchor['color'][2]
+                                a += nw * anchor['alpha']
+                            fill_colors.append((r, g, b, a))
+                        fill_coords.append((u, v, 0.0))
+                        
+            obj_result.append({
+                'groups': island_groups,
+                'fill_coords': fill_coords,
+                'fill_colors': fill_colors,
+            })
             
         _normals_cache[name] = {'hash': h, 'threshold': threshold, 'result': obj_result}
         results[name] = obj_result
-        total_groups += sum(len(g) for g in obj_result)
+        total_groups += sum(len(isle_res['groups']) for isle_res in obj_result)
         
     _wlog(f"job {job_id}: normals computed, total islands {sum(len(od['islands']) for od in objects)}, groups {total_groups}")
     return results
