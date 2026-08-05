@@ -111,6 +111,60 @@ def _add_arrow(origin, vector, is_positive, color, out_lines, out_lines_colors, 
 _normal_data = {}
 _cached_filter_state = None
 
+_FILL_VERT_SRC = """
+void main() {
+    fragColor = color;
+    fragType = type;
+    fragPos = pos;
+    gl_Position = ModelViewProjectionMatrix * vec4(pos, 1.0);
+}
+"""
+
+_FILL_FRAG_SRC = """
+void main() {
+    // Generate checkerboard pattern
+    float d = float(divisions);
+    int iu = int(mod(floor(fragPos.x * d), 2.0));
+    int iv = int(mod(floor(fragPos.y * d), 2.0));
+    
+    // Negative axis is checker (10% or 25%). Positive is solid (25%).
+    float checkerAlpha = ((iu + iv) % 2 == 0) ? 0.2 : 0.25;
+    float solidAlpha = 0.25;
+    
+    // Map fragType [-1, 1] to [0, 1] for blending
+    float mixFactor = clamp((fragType + 1.0) * 0.5, 0.0, 1.0);
+    
+    // Smoothly blend between checkerboard and solid based on proximity to axis type
+    float alpha = mix(checkerAlpha, solidAlpha, mixFactor);
+    
+    outColor = vec4(fragColor.rgb, alpha);
+}
+"""
+
+_fill_shader = None
+
+def _get_fill_shader():
+    global _fill_shader
+    import gpu
+    if _fill_shader is None:
+        info = gpu.types.GPUShaderCreateInfo()
+        info.push_constant('MAT4',  "ModelViewProjectionMatrix")
+        info.push_constant('FLOAT', "divisions")
+        info.vertex_in(0, 'VEC3', "pos")
+        info.vertex_in(1, 'VEC4', "color")
+        info.vertex_in(2, 'FLOAT', "type")
+        vert_out = gpu.types.GPUStageInterfaceInfo("normals_fill_iface")
+        vert_out.smooth('VEC4', "fragColor")
+        vert_out.smooth('FLOAT', "fragType")
+        vert_out.smooth('VEC3', "fragPos")
+        info.vertex_out(vert_out)
+        info.fragment_out(0, 'VEC4', "outColor")
+        info.vertex_source(_FILL_VERT_SRC)
+        info.fragment_source(_FILL_FRAG_SRC)
+        _fill_shader = gpu.shader.create_from_info(info)
+    return _fill_shader
+
+
 def rebuild_from_worker_data(results):
     global _normal_data, _cached_filter_state
     _normal_data = results
@@ -133,7 +187,7 @@ def _rebuild_batches(props, context):
     
     line_coords, line_colors = [], []
     tri_coords, tri_colors = [], []
-    fill_coords, fill_colors = [], []
+    fill_coords, fill_colors, fill_types = [], [], []
     
     # Target size: roughly 30 pixels on screen.
     # zoom = pixels_per_uv / 256.0
@@ -156,13 +210,15 @@ def _rebuild_batches(props, context):
             if not island_groups:
                 continue
                 
+            if res.get('fill_coords'):
+                fill_coords.extend(res['fill_coords'])
+                fill_colors.extend(res['fill_colors'])
+                fill_types.extend(res.get('fill_types', [1.0] * len(res['fill_coords'])))
+                
             island_uv_area = island_groups[0].get('island_uv_area', 1.0)
             if island_uv_area * ppuv_sq < min_island_px_area:
                 continue
                 
-            if res.get('fill_coords'):
-                fill_coords.extend(res['fill_coords'])
-                fill_colors.extend(res['fill_colors'])
                 
             for g in island_groups:
                 center = g['center']
@@ -207,9 +263,16 @@ def _rebuild_batches(props, context):
     else:
         _batch_tris = None
         
-    from . import stretch_heatmap
     if fill_coords:
-        _batch_fill = stretch_heatmap.build_batch_from_precomputed(fill_coords, fill_colors)
+        fill_shader = _get_fill_shader()
+        if fill_shader:
+            _batch_fill = batch_for_shader(fill_shader, 'TRIS', {
+                "pos": fill_coords,
+                "color": fill_colors,
+                "type": fill_types
+            })
+        else:
+            _batch_fill = None
     else:
         _batch_fill = None
 
@@ -217,9 +280,17 @@ def draw(props, shader, context):
     _rebuild_batches(props, context)
     
     if _batch_fill:
-        from . import stretch_heatmap
-        stretch_heatmap.draw(_batch_fill, opacity=1.0)
-        shader.bind()
+        fill_shader = _get_fill_shader()
+        if fill_shader:
+            fill_shader.bind()
+            
+            from . import stretch_checker
+            z_lvl = stretch_checker.get_zoom_level(context)
+            divs = stretch_checker.get_divisions(z_lvl)
+            fill_shader.uniform_float("divisions", float(divs))
+            
+            _batch_fill.draw(fill_shader)
+            shader.bind()
     
     if _batch_lines:
         gpu.state.line_width_set(2.0)

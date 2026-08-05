@@ -490,37 +490,41 @@ def _run_normals(objects, threshold, normals_space, job_id):
                 
             fill_coords = []
             fill_colors = []
+            fill_types = []
             
             if threshold == 'NONE' and island_groups:
-                # Solid fill for average mode
                 group = island_groups[0]
                 ref_idx = group['_best_idx']
                 rgb = AXIS_COLORS[ref_idx]
-                alpha = FILL_ALPHA_POS if ref_idx % 2 == 0 else FILL_ALPHA_NEG
-                color = (rgb[0], rgb[1], rgb[2], alpha)
+                is_pos = (ref_idx % 2 == 0)
+                type_val = 1.0 if is_pos else -1.0
+                color = (rgb[0], rgb[1], rgb[2], 1.0) # alpha handled in shader
                 
                 for tri in isle.tris:
                     for u, v in tri:
                         fill_coords.append((u, v, 0.0))
                         fill_colors.append(color)
+                        fill_types.append(type_val)
             elif island_groups:
                 # Radial gradient fill for 90 degree mode
                 anchors = []
                 for g_info in island_groups:
                     ref_idx = g_info.get('_best_idx', 0)
                     rgb = AXIS_COLORS[ref_idx]
-                    alpha = FILL_ALPHA_POS if ref_idx % 2 == 0 else FILL_ALPHA_NEG
+                    is_pos = (ref_idx % 2 == 0)
+                    type_val = 1.0 if is_pos else -1.0
                     anchors.append({
                         'center': g_info['center'],
                         'color': rgb,
-                        'alpha': alpha,
+                        'type': type_val,
                     })
                     
                 for tri in isle.tris:
                     for u, v in tri:
                         if len(anchors) == 1:
                             c = anchors[0]
-                            fill_colors.append((*c['color'], c['alpha']))
+                            fill_colors.append((*c['color'], 1.0))
+                            fill_types.append(c['type'])
                         else:
                             weights = []
                             for a in anchors:
@@ -530,20 +534,23 @@ def _run_normals(objects, threshold, normals_space, job_id):
                                 weights.append(1.0 / max(d_sq, 1e-8))
                                 
                             total_w = sum(weights)
-                            r, g, b, a = 0.0, 0.0, 0.0, 0.0
+                            r, g, b = 0.0, 0.0, 0.0
+                            t = 0.0
                             for w, anchor in zip(weights, anchors):
                                 nw = w / total_w
                                 r += nw * anchor['color'][0]
                                 g += nw * anchor['color'][1]
                                 b += nw * anchor['color'][2]
-                                a += nw * anchor['alpha']
-                            fill_colors.append((r, g, b, a))
+                                t += nw * anchor['type']
+                            fill_colors.append((r, g, b, 1.0))
+                            fill_types.append(t)
                         fill_coords.append((u, v, 0.0))
                         
             obj_result.append({
                 'groups': island_groups,
                 'fill_coords': fill_coords,
                 'fill_colors': fill_colors,
+                'fill_types': fill_types,
             })
             
         _normals_cache[name] = {'hash': h, 'threshold': threshold, 'result': obj_result}
