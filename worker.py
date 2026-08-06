@@ -162,12 +162,17 @@ def _run_normals(objects, threshold, job_id):
                     face_best_idx.append(-1)
                     continue
                 nx, ny, nz = fn[0]/l, fn[1]/l, fn[2]/l
+                
+                hnx, hny, hnz = round(nx, 1), round(ny, 1), round(nz, 1)
+                
                 best_idx = 0
                 best_dot = -2.0
                 for ridx, rd in enumerate(ref_dirs):
-                    dot = nx*rd[0] + ny*rd[1] + nz*rd[2]
+                    dot = hnx*rd[0] + hny*rd[1] + hnz*rd[2]
                     if dot > best_dot:
-                        best_dot, best_idx = dot, ridx
+                        best_dot = dot
+                        best_idx = ridx
+                        
                 face_best_idx.append(best_idx)
                 
             groups = {}
@@ -187,7 +192,6 @@ def _run_normals(objects, threshold, job_id):
                      'gux': 0, 'guy': 0, 'guz': 0,
                      'gvx': 0, 'gvy': 0, 'gvz': 0,
                      'u': 0, 'v': 0, 'count': 0,
-                     'best_idx': idx,
                      'tris': []}
                 
                 while stack:
@@ -240,12 +244,22 @@ def _run_normals(objects, threshold, job_id):
                 
                 # True average normal
                 tnx, tny, tnz = g['nx']/c, g['ny']/c, g['nz']/c
-                l = math.sqrt(tnx*tnx + tny*tny + tnz*tnz)
-                if l > 1e-8:
-                    tnx, tny, tnz = tnx/l, tny/l, tnz/l
+                gl = math.sqrt(tnx*tnx + tny*tny + tnz*tnz)
+                if gl > 1e-8:
+                    g['true_normal'] = (tnx/gl, tny/gl, tnz/gl)
                 else:
-                    tnx, tny, tnz = (0.0, 0.0, 0.0)
-                g['true_normal'] = (tnx, tny, tnz)
+                    g['true_normal'] = (0.0, 0.0, 1.0)
+                    
+                # Calculate bucket based on true average normal
+                best_idx = 0
+                best_dot = -2.0
+                nx, ny, nz = g['true_normal']
+                for r_idx, (rx, ry, rz) in enumerate(ref_dirs):
+                    d = nx*rx + ny*ry + nz*rz
+                    if d > best_dot:
+                        best_dot = d
+                        best_idx = r_idx
+                g['best_idx'] = best_idx
 
                 # Calculate snap fidelity against the bucket it fell into
                 snx, sny, snz = ref_dirs[g['best_idx']]
@@ -309,13 +323,7 @@ def _run_normals(objects, threshold, job_id):
                 c = g['count']
                 
                 # Displayed normal (local space)
-                if threshold == '90':
-                    # Snap to the exact cardinal reference direction
-                    nx, ny, nz = ref_dirs[g['best_idx']]
-                else:
-                    # Use the true average normal of the best representative group
-                    nx, ny, nz = g['true_normal']
-                    
+                nx, ny, nz = g['true_normal']
 
                 # Average local gradients using the original count
                 c = g['count']
