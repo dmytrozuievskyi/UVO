@@ -6,7 +6,17 @@ from gpu_extras.batch import batch_for_shader
 _batch_lines = None
 _batch_tris = None
 
-def get_arrow_geometry(origin, vector, is_positive, max_len):
+def get_display_aspect():
+    try:
+        space = bpy.context.space_data
+        img = getattr(space, 'image', None) if space else None
+        if img and img.size[0] > 0 and img.size[1] > 0:
+            return img.size[0] / img.size[1]
+    except:
+        pass
+    return 1.0
+
+def get_arrow_geometry(origin, vector, is_positive, max_len, aspect=1.0):
     ox, oy = origin
     vx, vy = vector
     
@@ -14,57 +24,66 @@ def get_arrow_geometry(origin, vector, is_positive, max_len):
     if length < 0.0001:
         return [], [], []
         
-    dir_x, dir_y = vx / length, vy / length
+    vis_length = math.hypot(vx, vy / aspect)
+    if vis_length > 1e-8:
+        scalar = (length * max_len) / vis_length
+    else:
+        scalar = max_len
+        
+    vx_scaled = vx * scalar
+    vy_scaled = vy * scalar
     
-    end_x = ox + vx
-    end_y = oy + vy
+    end_x = ox + vx_scaled
+    end_y = oy + vy_scaled
     
     line_coords = [ (ox, oy, 0.0), (end_x, end_y, 0.0) ]
     
-    # max_len is 45px, so 10px is (12.0/48.0) of max_len
+    vis_vx = vx_scaled
+    vis_vy = vy_scaled / aspect
+    vis_dir_x = vis_vx / (length * max_len)
+    vis_dir_y = vis_vy / (length * max_len)
+    
     head_len = max_len * (12.0 / 48.0)
     head_half_width = head_len * 0.5
     
-    # Don't scale down the width of the arrowhead so they all look consistent.
-    # Just cap the length so it doesn't extend backwards past the origin.
-    if head_len > length:
-        head_len = length
+    if head_len > (length * max_len):
+        head_len = length * max_len
     
     if is_positive:
-        tip_x, tip_y = end_x, end_y
-        base_x = tip_x - dir_x * head_len
-        base_y = tip_y - dir_y * head_len
+        tip_x, tip_y = vis_vx, vis_vy
+        base_x = tip_x - vis_dir_x * head_len
+        base_y = tip_y - vis_dir_y * head_len
         
-        perp_x = -dir_y * head_half_width
-        perp_y = dir_x * head_half_width
+        perp_x = -vis_dir_y * head_half_width
+        perp_y = vis_dir_x * head_half_width
         
-        p1 = (tip_x, tip_y, 0.0)
-        p2 = (base_x + perp_x, base_y + perp_y, 0.0)
-        p3 = (base_x - perp_x, base_y - perp_y, 0.0)
+        p1 = (ox + tip_x, oy + tip_y * aspect, 0.0)
+        p2 = (ox + base_x + perp_x, oy + (base_y + perp_y) * aspect, 0.0)
+        p3 = (ox + base_x - perp_x, oy + (base_y - perp_y) * aspect, 0.0)
         
         return line_coords, [p1, p2, p3], []
     else:
-        tip_x, tip_y = end_x, end_y
-        base_x = tip_x + dir_x * head_len
-        base_y = tip_y + dir_y * head_len
+        tip_x, tip_y = vis_vx, vis_vy
+        base_x = tip_x + vis_dir_x * head_len
+        base_y = tip_y + vis_dir_y * head_len
         
-        perp_x = -dir_y * head_half_width
-        perp_y = dir_x * head_half_width
+        perp_x = -vis_dir_y * head_half_width
+        perp_y = vis_dir_x * head_half_width
         
-        p1 = (tip_x, tip_y, 0.0)
-        p2 = (base_x + perp_x, base_y + perp_y, 0.0)
-        p3 = (base_x - perp_x, base_y - perp_y, 0.0)
+        p1 = (ox + tip_x, oy + tip_y * aspect, 0.0)
+        p2 = (ox + base_x + perp_x, oy + (base_y + perp_y) * aspect, 0.0)
+        p3 = (ox + base_x - perp_x, oy + (base_y - perp_y) * aspect, 0.0)
         
         hollow_lines = [ p1, p2, p2, p3, p3, p1 ]
         return line_coords, [], hollow_lines
 
-def get_circle_geometry(center, radius, is_filled):
+def get_circle_geometry(center, radius, is_filled, aspect=1.0):
     cx, cy = center
     segs = 16
     pts = []
     for i in range(segs):
         ang = (i / segs) * math.pi * 2
-        pts.append((cx + math.cos(ang)*radius, cy + math.sin(ang)*radius, 0.0))
+        pts.append((cx + math.cos(ang)*radius, cy + math.sin(ang)*radius * aspect, 0.0))
         
     if is_filled:
         tris = []
@@ -78,8 +97,8 @@ def get_circle_geometry(center, radius, is_filled):
             lines.extend([pts[i], pts[(i+1)%segs]])
         return [], [], lines
 
-def _add_circle(center, radius, is_filled, color, out_lines, out_lines_colors, out_tris, out_tris_colors):
-    lc, tc, hl = get_circle_geometry(center, radius, is_filled)
+def _add_circle(center, radius, is_filled, color, out_lines, out_lines_colors, out_tris, out_tris_colors, aspect=1.0):
+    lc, tc, hl = get_circle_geometry(center, radius, is_filled, aspect)
     for _ in range(len(hl) // 2):
         out_lines.extend(hl[-2:])
         out_lines_colors.extend((color, color))
@@ -89,8 +108,8 @@ def _add_circle(center, radius, is_filled, color, out_lines, out_lines_colors, o
         out_tris_colors.extend((color, color, color))
         del tc[-3:]
 
-def _add_arrow(origin, vector, is_positive, color, out_lines, out_lines_colors, out_tris, out_tris_colors, max_len):
-    lc, tc, hl = get_arrow_geometry(origin, vector, is_positive, max_len)
+def _add_arrow(origin, vector, is_positive, color, out_lines, out_lines_colors, out_tris, out_tris_colors, max_len, aspect=1.0):
+    lc, tc, hl = get_arrow_geometry(origin, vector, is_positive, max_len, aspect)
     
     for _ in range(len(lc) // 2):
         out_lines.extend(lc[-2:])
@@ -125,7 +144,7 @@ void main() {
     // Generate checkerboard pattern
     float d = float(divisions);
     int iu = int(mod(floor(fragPos.x * d), 2.0));
-    int iv = int(mod(floor(fragPos.y * d), 2.0));
+    int iv = int(mod(floor((fragPos.y * d) / aspect), 2.0));
     
     // Negative axis is checker (10% or 25%). Positive is solid (25%).
     float checkerAlpha = ((iu + iv) % 2 == 0) ? 0.2 : 0.25;
@@ -150,6 +169,7 @@ def _get_fill_shader():
         info = gpu.types.GPUShaderCreateInfo()
         info.push_constant('MAT4',  "ModelViewProjectionMatrix")
         info.push_constant('FLOAT', "divisions")
+        info.push_constant('FLOAT', "aspect")
         info.vertex_in(0, 'VEC3', "pos")
         info.vertex_in(1, 'VEC4', "color")
         info.vertex_in(2, 'FLOAT', "type")
@@ -219,7 +239,8 @@ def _rebuild_batches(props, context):
             if island_uv_area * ppuv_sq < min_island_px_area:
                 continue
                 
-                
+            aspect = get_display_aspect()
+            
             for g in island_groups:
                 center = g['center']
                 nx, ny, nz = g['normal']
@@ -232,21 +253,21 @@ def _rebuild_batches(props, context):
                 
                 if props.normal_filter_x:
                     if max_idx == 0:
-                        _add_circle(center, circle_radius, nx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_circle(center, circle_radius, nx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, aspect)
                     if abs(px_u) > 1e-4 or abs(px_v) > 1e-4:
-                        _add_arrow(center, (px_u * max_len, px_v * max_len), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
+                        _add_arrow(center, (px_u, px_v), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len, aspect)
                         
                 if props.normal_filter_y:
                     if max_idx == 1:
-                        _add_circle(center, circle_radius, ny > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_circle(center, circle_radius, ny > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, aspect)
                     if abs(py_u) > 1e-4 or abs(py_v) > 1e-4:
-                        _add_arrow(center, (py_u * max_len, py_v * max_len), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
+                        _add_arrow(center, (py_u, py_v), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len, aspect)
                         
                 if props.normal_filter_z:
                     if max_idx == 2:
-                        _add_circle(center, circle_radius, nz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors)
+                        _add_circle(center, circle_radius, nz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, aspect)
                     if abs(pz_u) > 1e-4 or abs(pz_v) > 1e-4:
-                        _add_arrow(center, (pz_u * max_len, pz_v * max_len), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len)
+                        _add_arrow(center, (pz_u, pz_v), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len, aspect)
 
     try:
         shader = gpu.shader.from_builtin('SMOOTH_COLOR')
@@ -288,6 +309,7 @@ def draw(props, shader, context):
             z_lvl = stretch_checker.get_zoom_level(context)
             divs = stretch_checker.get_divisions(z_lvl)
             fill_shader.uniform_float("divisions", float(divs))
+            fill_shader.uniform_float("aspect", float(get_display_aspect()))
             
             _batch_fill.draw(fill_shader)
             shader.bind()
