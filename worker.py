@@ -100,7 +100,7 @@ _stretch_cache     = {}  # {name: [(cache_key, result), ...]}  per-island stretc
 _stretch_local_cache = {}  # {name: {local_cache_key: {'ref_a': A, 'ref_b': B, 'result': ...}}}
 _normals_cache     = {}  # {name: {'hash': int, 'threshold': str, 'result': list}}
 
-def _run_normals(objects, threshold, normals_space, job_id):
+def _run_normals(objects, threshold, job_id):
     """Group normals per island based on threshold. Projects 3D axes onto UV space."""
     results = {}
     total_groups = 0
@@ -223,38 +223,7 @@ def _run_normals(objects, threshold, normals_space, job_id):
                 groups[group_counter] = g
                 group_counter += 1
                 
-            island_groups = []
-            
-            # Setup transformation matrices if GLOBAL space is requested
-            ax_x, ax_y, ax_z = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
-            use_global = (normals_space == 'GLOBAL') and ('matrix_world' in od)
-            if use_global:
-                mw = od['matrix_world']
-                # To transform global axes to local space for dotting with local gradient,
-                # we multiply by the inverse of the upper 3x3 of matrix_world.
-                # Compute inverse of upper 3x3
-                m00, m01, m02 = mw[0][0], mw[0][1], mw[0][2]
-                m10, m11, m12 = mw[1][0], mw[1][1], mw[1][2]
-                m20, m21, m22 = mw[2][0], mw[2][1], mw[2][2]
-                
-                det = m00*(m11*m22 - m12*m21) - m01*(m10*m22 - m12*m20) + m02*(m10*m21 - m11*m20)
-                if abs(det) > 1e-12:
-                    inv_det = 1.0 / det
-                    i00 = (m11*m22 - m12*m21) * inv_det
-                    i01 = (m02*m21 - m01*m22) * inv_det
-                    i02 = (m01*m12 - m02*m11) * inv_det
-                    
-                    i10 = (m12*m20 - m10*m22) * inv_det
-                    i11 = (m00*m22 - m02*m20) * inv_det
-                    i12 = (m02*m10 - m00*m12) * inv_det
-                    
-                    i20 = (m10*m21 - m11*m20) * inv_det
-                    i21 = (m01*m20 - m00*m21) * inv_det
-                    i22 = (m00*m11 - m01*m10) * inv_det
-                    
-                    ax_x = (i00, i10, i20)
-                    ax_y = (i01, i11, i21)
-                    ax_z = (i02, i12, i22)
+            island_groups = []            # The gradients (gu, gv) computed in intersect.py are in LOCAL space.
             
             # Calculate total area
             total_area = sum(g['count'] for g in groups.values())
@@ -347,29 +316,17 @@ def _run_normals(objects, threshold, normals_space, job_id):
                     # Use the true average normal of the best representative group
                     nx, ny, nz = g['true_normal']
                     
-                # Transform normal to global if requested
-                if use_global:
-                    mw = od['matrix_world']
-                    gnx = mw[0][0]*nx + mw[0][1]*ny + mw[0][2]*nz
-                    gny = mw[1][0]*nx + mw[1][1]*ny + mw[1][2]*nz
-                    gnz = mw[2][0]*nx + mw[2][1]*ny + mw[2][2]*nz
-                    gl = math.sqrt(gnx*gnx + gny*gny + gnz*gnz)
-                    if gl > 1e-8:
-                        nx, ny, nz = gnx/gl, gny/gl, gnz/gl
-                
-                # Average local gradients
+
+                # Average local gradients using the original count
+                c = g['count']
                 gux, guy, guz = g['gux']/c, g['guy']/c, g['guz']/c
                 gvx, gvy, gvz = g['gvx']/c, g['gvy']/c, g['gvz']/c
                 
-                # Project axes onto UV using dot product with gradients
-                px_u = ax_x[0]*gux + ax_x[1]*guy + ax_x[2]*guz
-                px_v = ax_x[0]*gvx + ax_x[1]*gvy + ax_x[2]*gvz
-                
-                py_u = ax_y[0]*gux + ax_y[1]*guy + ax_y[2]*guz
-                py_v = ax_y[0]*gvx + ax_y[1]*gvy + ax_y[2]*gvz
-                
-                pz_u = ax_z[0]*gux + ax_z[1]*guy + ax_z[2]*guz
-                pz_v = ax_z[0]*gvx + ax_z[1]*gvy + ax_z[2]*gvz
+                # The projection of Local axes (1,0,0), (0,1,0), (0,0,1) onto gradient
+                # is exactly the corresponding components of the gradient!
+                px_u, px_v = gux, gvx
+                py_u, py_v = guy, gvy
+                pz_u, pz_v = guz, gvz
                 
                 # Normalize the UV directions and scale by projection length (sqrt(1 - N^2))
                 def _normalize_proj(u, v, n_comp):
@@ -914,7 +871,7 @@ def _handle_compute(job, ix):
         
     # Normals
     if job.get('do_normals', False):
-        result['normal_results'] = _run_normals(objects, job.get('normal_threshold', 'AVERAGE'), job.get('normals_space', 'LOCAL'), job_id)
+        result['normal_results'] = _run_normals(objects, job.get('normal_threshold', 'AVERAGE'), job_id)
 
     _wlog(f"job {job_id}: COMPLETE {(time.perf_counter()-t0)*1000:.0f}ms total")
     return result

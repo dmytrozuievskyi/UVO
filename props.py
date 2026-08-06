@@ -427,16 +427,7 @@ class UVIDProperties(bpy.types.PropertyGroup):
         description="Threshold for grouping face normals",
         update=update_normal_overlay,
     )
-    normal_overlay_space: bpy.props.EnumProperty(
-        name="Space",
-        items=[
-            ('GLOBAL', "Global", "World space normals"),
-            ('LOCAL', "Local", "Object space normals"),
-        ],
-        default='LOCAL',
-        description="Space to evaluate normals in",
-        update=update_normal_overlay,
-    )
+
     normal_filter_x: bpy.props.BoolProperty(
         default=True,
         name="X",

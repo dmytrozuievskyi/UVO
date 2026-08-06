@@ -102,7 +102,7 @@ def _extract_boundary_segs(island_faces, face_index_set, uv_layer, uv_adj):
 
 
 def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
-                    object_name='', matrix_world=None):
+                    object_name=''):
     t0 = time.perf_counter()
     bm_copy.faces.ensure_lookup_table()
     uv_adj = _build_uv_adjacency(bm_copy, uv_layer)
@@ -149,7 +149,7 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
         island_faces = [bm_copy.faces[i] for i in face_index_set]
         
         ta = time.perf_counter()
-        f_tris, f_jacs, uv_area, surf_area, f_norms, f_areas, g_u, g_v = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
+        f_tris, f_jacs, uv_area, surf_area, f_norms, f_areas, g_u, g_v = _fan_tris_and_data(island_faces, uv_layer)
         if not f_tris:
             continue
             
@@ -197,7 +197,7 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
     return islands
 
 
-def _fan_tris_and_data(faces, uv_layer, matrix_world):
+def _fan_tris_and_data(faces, uv_layer):
     tris = []
     jacobians = []
     face_normals = []
@@ -208,7 +208,6 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
     total_surf_area = 0.0
 
     identity_j = (1.0, 0.0, 0.0, 1.0)
-    has_matrix = matrix_world is not None
 
     for face in faces:
         loops = face.loops
@@ -216,22 +215,15 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
             continue
         l0 = loops[0]
         uv0 = l0[uv_layer].uv
-        if has_matrix:
-            p0 = matrix_world @ l0.vert.co
-        else:
-            p0 = l0.vert.co
+        p0 = l0.vert.co
 
         for i in range(1, len(loops) - 1):
             l1 = loops[i]
             l2 = loops[i + 1]
             uv1 = l1[uv_layer].uv
             uv2 = l2[uv_layer].uv
-            if has_matrix:
-                p1 = matrix_world @ l1.vert.co
-                p2 = matrix_world @ l2.vert.co
-            else:
-                p1 = l1.vert.co
-                p2 = l2.vert.co
+            p1 = l1.vert.co
+            p2 = l2.vert.co
 
 
             tris.append(((uv0.x, uv0.y), (uv1.x, uv1.y), (uv2.x, uv2.y)))

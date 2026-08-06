@@ -184,7 +184,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 
         obj_seed = utils.get_string_hash(obj.name)
         islands  = ix.extract_islands(
-            bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name, obj.matrix_world
+            bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name
         )
         
         _t_extract = time.perf_counter()
@@ -368,15 +368,7 @@ def _dispatch_worker_job(props):
                 obj_entry['tex_h']        = cache.get('tex_h', 1024.0)
                 obj_entry['target_texel'] = cache.get('target_texel', 0.0)
 
-    if do_normals:
-        for obj_entry in objects:
-            cache = _obj_cache.get(obj_entry['name'])
-            if cache and 'matrix_world' in cache:
-                obj_entry['matrix_world'] = cache['matrix_world']
-            else:
-                obj = bpy.context.scene.objects.get(obj_entry['name'])
-                if obj:
-                    obj_entry['matrix_world'] = [list(r) for r in obj.matrix_world]
+
 
     job_id = pkg.next_job_id()
 
@@ -398,7 +390,6 @@ def _dispatch_worker_job(props):
         'do_classify': do_classify,
         'do_stretch':  do_stretch,
         'do_normals':  do_normals,
-        'normals_space': props.normal_overlay_space,
         'normal_threshold': props.normal_overlay_threshold,
     })
     
