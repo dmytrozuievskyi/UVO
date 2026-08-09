@@ -141,9 +141,22 @@ void main() {
 
 _FILL_FRAG_SRC = """
 void main() {
-    // Simply output the interpolated vertex color from the GPU
-    // Apply a fixed base transparency
-    outColor = vec4(fragColor.rgb, 0.4);
+    // Generate checkerboard pattern
+    float d = float(divisions);
+    int iu = int(mod(floor(fragPos.x * d), 2.0));
+    int iv = int(mod(floor((fragPos.y * d) / aspect), 2.0));
+    
+    // Negative axis is checker (10% or 25%). Positive is solid (25%).
+    float checkerAlpha = ((iu + iv) % 2 == 0) ? 0.2 : 0.25;
+    float solidAlpha = 0.25;
+    
+    // Map fragType [-1, 1] to [0, 1] for blending
+    float mixFactor = clamp((fragType + 1.0) * 0.5, 0.0, 1.0);
+    
+    // Smoothly blend between checkerboard and solid based on proximity to axis type
+    float alpha = mix(checkerAlpha, solidAlpha, mixFactor);
+    
+    outColor = vec4(fragColor.rgb, alpha);
 }
 """
 
