@@ -152,14 +152,17 @@ def _run_normals(objects, threshold, job_id):
                     v_to_t[k].append(i)
                     
             face_best_idx = []
+            face_hash = []
             for i, fn in enumerate(isle.face_normals):
                 area = isle.face_areas[i]
                 if area < 1e-8:
                     face_best_idx.append(-1)
+                    face_hash.append(None)
                     continue
                 l = math.sqrt(fn[0]**2 + fn[1]**2 + fn[2]**2)
                 if l < 1e-8:
                     face_best_idx.append(-1)
+                    face_hash.append(None)
                     continue
                 nx, ny, nz = fn[0]/l, fn[1]/l, fn[2]/l
                 
@@ -168,12 +171,13 @@ def _run_normals(objects, threshold, job_id):
                 best_idx = 0
                 best_dot = -2.0
                 for ridx, rd in enumerate(ref_dirs):
-                    dot = hnx*rd[0] + hny*rd[1] + hnz*rd[2]
+                    dot = nx*rd[0] + ny*rd[1] + nz*rd[2]
                     if dot > best_dot:
                         best_dot = dot
                         best_idx = ridx
                         
                 face_best_idx.append(best_idx)
+                face_hash.append((hnx, hny, hnz))
                 
             groups = {}
             visited = set()
@@ -220,9 +224,10 @@ def _run_normals(objects, threshold, job_id):
                     for u, v in tri:
                         k = (round(u, 5), round(v, 5))
                         for nbr in v_to_t.get(k, []):
-                            if nbr not in visited and face_best_idx[nbr] == idx:
-                                visited.add(nbr)
-                                stack.append(nbr)
+                            if nbr not in visited and face_best_idx[nbr] != -1:
+                                if face_best_idx[nbr] == idx or face_hash[nbr] == face_hash[curr]:
+                                    visited.add(nbr)
+                                    stack.append(nbr)
                                 
                 groups[group_counter] = g
                 group_counter += 1
@@ -290,7 +295,7 @@ def _run_normals(objects, threshold, job_id):
                 tnx, tny, tnz = g['true_normal']
                 for kg in kept_groups:
                     knx, kny, knz = kg['true_normal']
-                    dot = abs(tnx*knx + tny*kny + tnz*knz)
+                    dot = tnx*knx + tny*kny + tnz*knz
                     if dot > 0.7:
                         is_redundant = True
                         break
