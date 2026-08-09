@@ -449,40 +449,7 @@ def _run_normals(objects, threshold, job_id):
                                 final_center = (cx, cy)
                                 
                 # Calculate inverse covariance matrix for Gaussian splat blending
-                var_xx, var_yy, var_xy = 0.0, 0.0, 0.0
-                total_area_cov = 0.0
-                fcx, fcy = final_center
-                
-                for curr in g['tris']:
-                    tri = isle.tris[curr]
-                    # Use triangle center
-                    cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0
-                    cy = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0
-                    dx = cx - fcx
-                    dy = cy - fcy
-                    
-                    area = isle.face_areas[curr] if hasattr(isle, 'face_areas') and curr < len(isle.face_areas) else 1.0
-                    var_xx += dx*dx * area
-                    var_yy += dy*dy * area
-                    var_xy += dx*dy * area
-                    total_area_cov += area
-                    
-                if total_area_cov > 1e-8:
-                    var_xx /= total_area_cov
-                    var_yy /= total_area_cov
-                    var_xy /= total_area_cov
-                    
-                # Add tiny epsilon to prevent singularity on perfectly flat lines/points
-                var_xx += 1e-6
-                var_yy += 1e-6
-                
-                det = var_xx * var_yy - var_xy * var_xy
-                if abs(det) < 1e-12:
-                    inv_xx, inv_yy, inv_xy = 1.0, 1.0, 0.0
-                else:
-                    inv_xx = var_yy / det
-                    inv_yy = var_xx / det
-                    inv_xy = -var_xy / det
+                # [REMOVED] Background now uses smooth per-vertex gradients
                     
                 island_groups.append({
                     '_best_idx': g['best_idx'],
@@ -492,69 +459,48 @@ def _run_normals(objects, threshold, job_id):
                     'proj_y': py_norm,
                     'proj_z': pz_norm,
                     'island_uv_area': island_uv_area,
-                    'inv_cov': (inv_xx, inv_yy, inv_xy),
                 })
                 
             fill_coords = []
             fill_colors = []
             fill_types = []
             
-            if threshold == 'NONE' and island_groups:
-                group = island_groups[0]
-                ref_idx = group['_best_idx']
-                rgb = AXIS_COLORS[ref_idx]
-                is_pos = (ref_idx % 2 == 0)
+            # Smooth per-vertex gradient logic
+            v_to_colors = {}
+            # We iterate over ALL initial groups to ensure every single triangle gets colored,
+            # even if its group was later marked redundant (e.g. mirrored symmetries)
+            for g_info in groups.values():
+                b_idx = g_info['best_idx']
+                rgb = AXIS_COLORS[b_idx]
+                is_pos = (b_idx % 2 == 0)
                 type_val = 1.0 if is_pos else -1.0
-                color = (rgb[0], rgb[1], rgb[2], 1.0) # alpha handled in shader
                 
-                for tri in isle.tris:
-                    for u, v in tri:
-                        fill_coords.append((u, v, 0.0))
-                        fill_colors.append(color)
-                        fill_types.append(type_val)
-            elif island_groups:
-                # Radial gradient fill for 90 degree mode
-                anchors = []
-                for g_info in island_groups:
-                    ref_idx = g_info.get('_best_idx', 0)
-                    rgb = AXIS_COLORS[ref_idx]
-                    is_pos = (ref_idx % 2 == 0)
-                    type_val = 1.0 if is_pos else -1.0
-                    anchors.append({
-                        'center': g_info['center'],
-                        'color': rgb,
-                        'type': type_val,
-                        'inv_cov': g_info['inv_cov'],
-                    })
-                    
-                for tri in isle.tris:
-                    for u, v in tri:
-                        if len(anchors) == 1:
-                            c = anchors[0]
-                            fill_colors.append((*c['color'], 1.0))
-                            fill_types.append(c['type'])
-                        else:
-                            weights = []
-                            for a in anchors:
-                                dx = u - a['center'][0]
-                                dy = v - a['center'][1]
-                                inv_xx, inv_yy, inv_xy = a['inv_cov']
-                                # Mahalanobis distance squared
-                                d_sq = inv_xx * dx * dx + 2.0 * inv_xy * dx * dy + inv_yy * dy * dy
-                                weights.append(1.0 / max(d_sq, 1e-8))
-                                
-                            total_w = sum(weights)
-                            r, g, b = 0.0, 0.0, 0.0
-                            t = 0.0
-                            for w, anchor in zip(weights, anchors):
-                                nw = w / total_w
-                                r += nw * anchor['color'][0]
-                                g += nw * anchor['color'][1]
-                                b += nw * anchor['color'][2]
-                                t += nw * anchor['type']
-                            fill_colors.append((r, g, b, 1.0))
-                            fill_types.append(t)
-                        fill_coords.append((u, v, 0.0))
+                for tri_idx in g_info['tris']:
+                    for u, v in isle.tris[tri_idx]:
+                        k = (round(u, 5), round(v, 5))
+                        if k not in v_to_colors: 
+                            v_to_colors[k] = {'r':0.0, 'g':0.0, 'b':0.0, 't':0.0, 'c':0}
+                        v_to_colors[k]['r'] += rgb[0]
+                        v_to_colors[k]['g'] += rgb[1]
+                        v_to_colors[k]['b'] += rgb[2]
+                        v_to_colors[k]['t'] += type_val
+                        v_to_colors[k]['c'] += 1
+                        
+            # Build fill coords with the averaged vertex colors
+            for tri in isle.tris:
+                for u, v in tri:
+                    k = (round(u, 5), round(v, 5))
+                    vd = v_to_colors.get(k)
+                    if vd and vd['c'] > 0:
+                        r = vd['r'] / vd['c']
+                        g = vd['g'] / vd['c']
+                        b = vd['b'] / vd['c']
+                        t = vd['t'] / vd['c']
+                    else:
+                        r, g, b, t = 1.0, 1.0, 1.0, 1.0
+                    fill_coords.append((u, v, 0.0))
+                    fill_colors.append((r, g, b, 1.0))
+                    fill_types.append(t)
                         
             obj_result.append({
                 'groups': island_groups,
