@@ -248,25 +248,30 @@ def _rebuild_batches(props, context):
                 py_u, py_v = g['proj_y']
                 pz_u, pz_v = g['proj_z']
                 
+                # Fetch stability flags with a default of True for backward compatibility
+                stable_x = g.get('stable_x', True)
+                stable_y = g.get('stable_y', True)
+                stable_z = g.get('stable_z', True)
+                
                 abs_n = [abs(nx), abs(ny), abs(nz)]
                 max_idx = abs_n.index(max(abs_n))
                 
                 if props.normal_filter_x:
                     if max_idx == 0:
                         _add_circle(center, circle_radius, nx > 0, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, aspect)
-                    if abs(px_u) > 1e-4 or abs(px_v) > 1e-4:
+                    if stable_x and (abs(px_u) > 1e-4 or abs(px_v) > 1e-4):
                         _add_arrow(center, (px_u, px_v), True, (1.0, 0.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len, aspect)
                         
                 if props.normal_filter_y:
                     if max_idx == 1:
                         _add_circle(center, circle_radius, ny > 0, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, aspect)
-                    if abs(py_u) > 1e-4 or abs(py_v) > 1e-4:
+                    if stable_y and (abs(py_u) > 1e-4 or abs(py_v) > 1e-4):
                         _add_arrow(center, (py_u, py_v), True, (0.0, 1.0, 0.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len, aspect)
                         
                 if props.normal_filter_z:
                     if max_idx == 2:
                         _add_circle(center, circle_radius, nz > 0, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, aspect)
-                    if abs(pz_u) > 1e-4 or abs(pz_v) > 1e-4:
+                    if stable_z and (abs(pz_u) > 1e-4 or abs(pz_v) > 1e-4):
                         _add_arrow(center, (pz_u, pz_v), True, (0.0, 0.5, 1.0, 1.0), line_coords, line_colors, tri_coords, tri_colors, max_len, aspect)
 
     try:

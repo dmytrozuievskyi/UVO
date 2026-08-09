@@ -195,6 +195,8 @@ def _run_normals(objects, threshold, job_id):
                 g = {'nx': 0, 'ny': 0, 'nz': 0, 
                      'gux': 0, 'guy': 0, 'guz': 0,
                      'gvx': 0, 'gvy': 0, 'gvz': 0,
+                     'abs_gux': 0, 'abs_guy': 0, 'abs_guz': 0,
+                     'abs_gvx': 0, 'abs_gvy': 0, 'abs_gvz': 0,
                      'u': 0, 'v': 0, 'count': 0,
                      'tris': []}
                 
@@ -215,6 +217,13 @@ def _run_normals(objects, threshold, job_id):
                     g['gvx'] += gv[0] * area
                     g['gvy'] += gv[1] * area
                     g['gvz'] += gv[2] * area
+                    
+                    g['abs_gux'] += abs(gu[0]) * area
+                    g['abs_guy'] += abs(gu[1]) * area
+                    g['abs_guz'] += abs(gu[2]) * area
+                    g['abs_gvx'] += abs(gv[0]) * area
+                    g['abs_gvy'] += abs(gv[1]) * area
+                    g['abs_gvz'] += abs(gv[2]) * area
                     
                     tri = isle.tris[curr]
                     g['u'] += (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0 * area
@@ -341,6 +350,9 @@ def _run_normals(objects, threshold, job_id):
                 py_u, py_v = guy, gvy
                 pz_u, pz_v = guz, gvz
                 
+                abs_gux, abs_guy, abs_guz = g['abs_gux']/c, g['abs_guy']/c, g['abs_guz']/c
+                abs_gvx, abs_gvy, abs_gvz = g['abs_gvx']/c, g['abs_gvy']/c, g['abs_gvz']/c
+                
                 # Normalize the UV directions and scale by projection length (sqrt(1 - N^2))
                 def _normalize_proj(u, v, n_comp):
                     ll = math.hypot(u, v)
@@ -349,9 +361,21 @@ def _run_normals(objects, threshold, job_id):
                     scale = math.sqrt(max(0.0, 1.0 - n_comp*n_comp))
                     return ((u/ll) * scale, (v/ll) * scale)
                     
-                px_norm = _normalize_proj(px_u, px_v, nx)
-                py_norm = _normalize_proj(py_u, py_v, ny)
-                pz_norm = _normalize_proj(pz_u, pz_v, nz)
+                def _process_axis(p_u, p_v, abs_u, abs_v, n_comp):
+                    len_proj = math.hypot(p_u, p_v)
+                    stable = len_proj > 0.3
+                    if stable:
+                        return _normalize_proj(p_u, p_v, n_comp), True
+                    else:
+                        scale = math.sqrt(max(0.0, 1.0 - n_comp*n_comp))
+                        if abs_u > abs_v:
+                            return (scale, 0.0), False
+                        else:
+                            return (0.0, scale), False
+                            
+                px_norm, stable_x = _process_axis(px_u, px_v, abs_gux, abs_gvx, nx)
+                py_norm, stable_y = _process_axis(py_u, py_v, abs_guy, abs_gvy, ny)
+                pz_norm, stable_z = _process_axis(pz_u, pz_v, abs_guz, abs_gvz, nz)
                 
                 # Axis slice snapping algorithm
                 cu, cv = g['u'] / c, g['v'] / c
@@ -491,6 +515,9 @@ def _run_normals(objects, threshold, job_id):
                     'proj_x': px_norm,
                     'proj_y': py_norm,
                     'proj_z': pz_norm,
+                    'stable_x': stable_x,
+                    'stable_y': stable_y,
+                    'stable_z': stable_z,
                     'island_uv_area': island_uv_area,
                     'inv_cov': (inv_xx, inv_yy, inv_xy),
                 })
