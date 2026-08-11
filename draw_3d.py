@@ -197,7 +197,11 @@ def draw_callback_3d():
     # Get preferences
     prefs = context.preferences.addons[__package__].preferences
     color = (*prefs.seams_3d_color, prefs.seams_3d_opacity)
-    thickness = prefs.seams_3d_thickness
+    
+    theme = context.preferences.themes[0]
+    edge_width = getattr(theme.view_3d, 'edge_width', 1)
+    thickness = (edge_width * 2) + 1
+        
     style = prefs.seams_3d_style
     
     # Get the appropriate shader

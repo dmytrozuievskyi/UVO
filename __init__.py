@@ -312,12 +312,6 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
         min=0.0, max=1.0,
         description="Color for UV seam lines in the 3D Viewport",
     )
-    seams_3d_thickness: bpy.props.IntProperty(
-        name="Seam Thickness",
-        default=2,
-        min=1, max=6,
-        description="Line width for UV seam lines",
-    )
     seams_3d_opacity: bpy.props.FloatProperty(
         name="Seam Opacity",
         default=0.85,
@@ -342,7 +336,6 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
         
         row = layout.row(align=False)
         row.prop(self, "seams_3d_style", text="")
-        row.prop(self, "seams_3d_thickness", text="Thickness")
         row.prop(self, "seams_3d_color", text="")
         
         layout.separator()
