@@ -183,22 +183,21 @@ def _run_normals(objects, threshold, job_id):
             visited = set()
             group_counter = 0
             
-            for i in range(len(isle.face_normals)):
-                idx = face_best_idx[i]
-                if idx == -1 or i in visited:
+            num_faces = len(isle.face_normals)
+            for curr in range(num_faces):
+                idx = face_best_idx[curr]
+                if idx == -1 or curr in visited:
                     continue
-                
-                # Start new component
-                visited.add(i)
-                stack = [i]
-                
+                    
+                stack = [curr]
+                visited.add(curr)
                 g = {'nx': 0, 'ny': 0, 'nz': 0, 
                      'gux': 0, 'guy': 0, 'guz': 0,
                      'gvx': 0, 'gvy': 0, 'gvz': 0,
                      'abs_gux': 0, 'abs_guy': 0, 'abs_guz': 0,
                      'abs_gvx': 0, 'abs_gvy': 0, 'abs_gvz': 0,
                      'u': 0, 'v': 0, 'count': 0,
-                     'tris': []}
+                     'faces': [], 'tris': []}
                 
                 while stack:
                     curr = stack.pop()
@@ -229,6 +228,7 @@ def _run_normals(objects, threshold, job_id):
                     g['u'] += (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0 * area
                     g['v'] += (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0 * area
                     g['count'] += area
+                    g['faces'].append(curr)
                     
                     for u, v in tri:
                         k = (round(u, 5), round(v, 5))
@@ -241,6 +241,61 @@ def _run_normals(objects, threshold, job_id):
                 groups[group_counter] = g
                 group_counter += 1
                 
+            # Build face to group mapping
+            face_to_group = {}
+            for gid, g in groups.items():
+                for f in g['faces']:
+                    face_to_group[f] = gid
+
+            # Build group adjacency graph
+            group_adj = {i: set() for i in groups}
+            for k, tris in v_to_t.items():
+                shared_groups = list(set([face_to_group[t] for t in tris if t in face_to_group]))
+                for i in range(len(shared_groups)):
+                    for j in range(i+1, len(shared_groups)):
+                        group_adj[shared_groups[i]].add(shared_groups[j])
+                        group_adj[shared_groups[j]].add(shared_groups[i])
+
+            # Proximity merging: Absorb small groups into adjacent large groups
+            changed = True
+            while changed:
+                changed = False
+                sorted_gids = sorted(groups.keys(), key=lambda gid: groups[gid]['count'])
+                for gid in sorted_gids:
+                    if gid not in groups: continue
+                    g = groups[gid]
+                    neighbors = [groups[nid] for nid in group_adj[gid] if nid in groups]
+                    if not neighbors: continue
+                    
+                    largest_neighbor = max(neighbors, key=lambda n: n['count'])
+                    
+                    # Merge if group is < 35% of the largest neighbor's area
+                    if g['count'] < largest_neighbor['count'] * 0.35:
+                        largest_neighbor['count'] += g['count']
+                        largest_neighbor['u'] += g['u']
+                        largest_neighbor['v'] += g['v']
+                        largest_neighbor['nx'] += g['nx']
+                        largest_neighbor['ny'] += g['ny']
+                        largest_neighbor['nz'] += g['nz']
+                        
+                        for attr in ['abs_gux', 'abs_guy', 'abs_guz', 'abs_gvx', 'abs_gvy', 'abs_gvz', 'gux', 'guy', 'guz', 'gvx', 'gvy', 'gvz']:
+                            largest_neighbor[attr] += g[attr]
+                            
+                        # Update adjacency
+                        ln_id = next(k for k, v in groups.items() if v is largest_neighbor)
+                        group_adj[ln_id].update(group_adj[gid])
+                        group_adj[ln_id].discard(ln_id)
+                        
+                        for adj in group_adj[gid]:
+                            if adj in group_adj and gid in group_adj[adj]:
+                                group_adj[adj].remove(gid)
+                                if adj != ln_id:
+                                    group_adj[adj].add(ln_id)
+                                    
+                        del groups[gid]
+                        changed = True
+                        break
+
             island_groups = []            # The gradients (gu, gv) computed in intersect.py are in LOCAL space.
             
             # Calculate total area
