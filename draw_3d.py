@@ -224,6 +224,9 @@ def draw_callback_3d():
         shader.bind()
         shader.uniform_float("color", color)
         
+        shader.uniform_float("ModelViewMatrix", gpu.matrix.get_model_view_matrix())
+        shader.uniform_float("ProjectionMatrix", gpu.matrix.get_projection_matrix())
+        
         # Draw each object's boundary edges
         for name, cache in _draw._obj_cache.items():
             coords = cache.get('seam_3d_coords')
@@ -253,13 +256,47 @@ def draw_callback_3d():
 _shader_solid = None
 _shader_dashed = None   # placeholder
 
+def _create_biased_solid_shader():
+    info = gpu.types.GPUShaderCreateInfo()
+    info.vertex_in(0, 'VEC3', "pos")
+    info.fragment_out(0, 'VEC4', "fragColor")
+    info.push_constant('MAT4', "ModelViewMatrix")
+    info.push_constant('MAT4', "ProjectionMatrix")
+    info.push_constant('VEC4', "color")
+    info.vertex_source("""
+void main() {
+    vec4 view_pos = ModelViewMatrix * vec4(pos, 1.0);
+    gl_Position = ProjectionMatrix * view_pos;
+    
+    // Distinguish between Perspective and Orthographic projection
+    // Perspective matrices have ProjectionMatrix[3][3] == 0.0
+    if (abs(ProjectionMatrix[3][3]) < 0.001) {
+        // Perspective: Original perfect bias scaled by depth (w)
+        gl_Position.z -= 0.002 * gl_Position.w;
+    } else {
+        // Orthographic: Exact mathematical equivalent of shifting the vertex 
+        // 1 millimeter towards the camera in view space. 
+        // (0.001 * ProjectionMatrix[2][2]) perfectly scales the depth bias 
+        // to the current orthographic clip range.
+        gl_Position.z += 0.001 * ProjectionMatrix[2][2];
+    }
+}
+""")
+    info.fragment_source("""
+void main() {
+    fragColor = color;
+}
+""")
+    return gpu.shader.create_from_info(info)
+
+
 def _get_3d_shader(style):
     """Return the appropriate shader for the requested line style."""
     global _shader_solid, _shader_dashed
     
     if style == 'SOLID':
         if _shader_solid is None:
-            _shader_solid = gpu.shader.from_builtin('UNIFORM_COLOR')
+            _shader_solid = _create_biased_solid_shader()
         return _shader_solid
     
     # placeholder for dashed shader
