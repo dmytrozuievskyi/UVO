@@ -220,13 +220,46 @@ def _find_uv_islands(faces, uv_layer):
     return islands
 
 
+class VIEW3D_OT_toggle_uv_seams_overlay(bpy.types.Operator):
+    bl_idname = "view3d.toggle_uv_seams_overlay"
+    bl_label = "Toggle UV Seams Overlay"
+    bl_description = "Toggle dynamic UV seam visualization in this viewport"
+    
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'EDIT_MESH' 
+                and context.space_data is not None 
+                and context.space_data.type == 'VIEW_3D')
+    
+    def execute(self, context):
+        from . import draw_3d
+        draw_3d.toggle_viewport(context)
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_toggle_uvo_3d_mute(bpy.types.Operator):
+    """Toggle the global mute state for UVO 3D Overlays"""
+    bl_idname = "view3d.toggle_uvo_3d_mute"
+    bl_label = "Toggle UVO 3D Mute"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.uv_3d_seam_props
+        props.is_muted = not props.is_muted
+        return {'FINISHED'}
+
+
 def register():
     bpy.utils.register_class(UV_OT_ToggleOverlay)
     bpy.utils.register_class(UV_OT_RefreshOverlay)
     bpy.utils.register_class(UV_OT_SampleStretchTexel)
+    bpy.utils.register_class(VIEW3D_OT_toggle_uv_seams_overlay)
+    bpy.utils.register_class(VIEW3D_OT_toggle_uvo_3d_mute)
 
 
 def unregister():
+    bpy.utils.unregister_class(VIEW3D_OT_toggle_uvo_3d_mute)
+    bpy.utils.unregister_class(VIEW3D_OT_toggle_uv_seams_overlay)
     bpy.utils.unregister_class(UV_OT_SampleStretchTexel)
     bpy.utils.unregister_class(UV_OT_RefreshOverlay)
     bpy.utils.unregister_class(UV_OT_ToggleOverlay)

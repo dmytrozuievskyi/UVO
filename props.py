@@ -409,16 +409,53 @@ class UVIDProperties(bpy.types.PropertyGroup):
     )
 
 
+def update_seams_3d_mode(self, context):
+    """When mode changes, update native seam visibility for all active viewports."""
+    from . import draw_3d
+    draw_3d.sync_native_seams_all(context)
+    draw_3d.tag_3d_redraw()
+
+
+def update_is_muted_3d(self, context):
+    from . import draw_3d
+    draw_3d.sync_native_seams_all(context)
+    draw_3d.tag_3d_redraw()
+
+class UV3DSeamProperties(bpy.types.PropertyGroup):
+    """Scene-level settings shared across all viewports."""
+    
+    is_muted: bpy.props.BoolProperty(
+        default=False,
+        name="Mute 3D Overlays",
+        description="Temporarily hide all 3D overlays without changing settings",
+        update=update_is_muted_3d,
+    )
+    
+    seams_3d_mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=[
+            ('OVERLAY',  "Overlay",  "Draw UV seams alongside Blender's native seams"),
+            ('OVERRIDE', "Override", "Hide native seams and show only UV seams"),
+        ],
+        default='OVERLAY',
+        update=update_seams_3d_mode,
+    )
+
+
+
 def register():
     try:
         bpy.utils.unregister_class(UVIDProperties)
         bpy.utils.unregister_class(UVO_ObjectProperties)
+        bpy.utils.unregister_class(UV3DSeamProperties)
     except RuntimeError:
         pass
     bpy.utils.register_class(UVIDProperties)
     bpy.utils.register_class(UVO_ObjectProperties)
+    bpy.utils.register_class(UV3DSeamProperties)
     bpy.types.Scene.uv_id_props = bpy.props.PointerProperty(type=UVIDProperties)
     bpy.types.Object.uv_id_props = bpy.props.PointerProperty(type=UVO_ObjectProperties)
+    bpy.types.Scene.uv_3d_seam_props = bpy.props.PointerProperty(type=UV3DSeamProperties)
 
 
 def unregister():
@@ -440,7 +477,12 @@ def unregister():
     except AttributeError:
         pass
     try:
+        del bpy.types.Scene.uv_3d_seam_props
+    except AttributeError:
+        pass
+    try:
         bpy.utils.unregister_class(UVIDProperties)
         bpy.utils.unregister_class(UVO_ObjectProperties)
+        bpy.utils.unregister_class(UV3DSeamProperties)
     except RuntimeError:
         pass

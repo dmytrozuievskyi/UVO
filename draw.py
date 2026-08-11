@@ -975,6 +975,8 @@ def update_batches_safe(context):
                     'tex_w':     float(obj.uv_id_props.tex_res_x),
                     'tex_h':     float(obj.uv_id_props.tex_res_y),
                     'target_texel': float(obj.uv_id_props.stretch_internal_texel),
+                    'seam_3d_coords': None,
+                    'seam_3d_batch':  None,
                 }
                 # Keep classify caches — worker needs previous state for pair-cache diffs.
                 any_changed = True
@@ -1034,9 +1036,15 @@ def update_batches_safe(context):
 @persistent
 def depsgraph_update_handler(scene, depsgraph):
     prop = getattr(scene, "uv_id_props", None)
-    if not prop or prop.is_muted:
-        return
-    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding and not prop.show_stretch:
+    
+    uv_overlays_active = (prop and not prop.is_muted and 
+                          (prop.show_uv_id or prop.show_intersect or 
+                           prop.show_padding or prop.show_stretch))
+    
+    from . import draw_3d
+    seams_3d_active = draw_3d.any_viewport_active()
+    
+    if not uv_overlays_active and not seams_3d_active:
         return
 
     if bpy.context.mode != 'EDIT_MESH':
@@ -1074,9 +1082,14 @@ def depsgraph_update_handler(scene, depsgraph):
                 force_rebuild = True
                 break
 
-    if not force_rebuild and not any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
-                                     for u in depsgraph.updates):
+    geometry_changed = any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
+                                     for u in depsgraph.updates)
+    if not force_rebuild and not geometry_changed:
         return
+
+    if seams_3d_active and geometry_changed:
+        draw_3d.invalidate_3d_boundaries()
+        draw_3d.tag_3d_redraw()
 
     def _do_rebuild():
         if not is_calculating:

@@ -175,11 +175,100 @@ def draw_header_button(self, context):
     row.popover(panel="IMAGE_PT_uv_id_overlay", text="")
 
 
+class VIEW3D_PT_uv_seams_overlay(bpy.types.Panel):
+    bl_label       = "UV Seams"
+    bl_idname      = "VIEW3D_PT_uv_seams_overlay"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x  = 12
+
+    def draw(self, context):
+        layout = self.layout
+        props  = context.scene.uv_3d_seam_props
+        space  = context.space_data
+        
+        native_on = hasattr(space, 'overlay') and space.overlay.show_overlays
+        if not native_on:
+            layout.label(text="Enable Overlays first", icon='INFO')
+            return
+            
+        if context.mode != 'EDIT_MESH':
+            layout.label(text="Enter Edit Mode to use", icon='INFO')
+            return
+
+        active = not props.is_muted
+        
+        from . import draw_3d
+        vp_enabled = draw_3d.is_active_in_space(space)
+        prefs = context.preferences.addons[__package__].preferences
+        
+        layout.label(text="UV Seam")
+        
+        row_seam = layout.row(align=False)
+        icon = 'CHECKBOX_HLT' if vp_enabled else 'CHECKBOX_DEHLT'
+        row_seam.operator(
+            "view3d.toggle_uv_seams_overlay",
+            text="",
+            icon=icon,
+            emboss=False
+        )
+        
+        content_seam = row_seam.row(align=False)
+        content_seam.enabled = vp_enabled and active
+        
+        split_seam = content_seam.split(factor=0.5, align=False)
+        split_seam.prop(props, "seams_3d_mode", text="")
+        split_seam.prop(prefs, "seams_3d_opacity", text="", slider=True)
+
+
+def draw_3d_header_button(self, context):
+    if context.space_data.type != 'VIEW_3D':
+        return
+        
+    layout = self.layout
+    props  = context.scene.uv_3d_seam_props
+    
+    native_on = hasattr(context.space_data, 'overlay') and context.space_data.overlay.show_overlays
+    is_active = (not props.is_muted) and native_on
+    
+    import sys
+    pkg   = sys.modules.get(__package__)
+    pcoll = pkg.preview_collections.get("main") if pkg else None
+    
+    row = layout.row(align=True)
+    btn = row.row(align=True)
+    btn.active = native_on
+    
+    if pcoll:
+        icon_id = pcoll["uv_overlay_on"].icon_id if is_active else pcoll["uv_overlay_off"].icon_id
+        btn.operator(
+            "view3d.toggle_uvo_3d_mute",
+            text="",
+            icon_value=icon_id,
+            depress=is_active,
+        )
+    else:
+        btn.operator(
+            "view3d.toggle_uvo_3d_mute",
+            text="",
+            icon='GROUP_UVS',
+            depress=is_active,
+        )
+        
+    row.popover(panel="VIEW3D_PT_uv_seams_overlay", text="")
+
+
 def register():
     bpy.utils.register_class(IMAGE_PT_uv_id_overlay)
     bpy.types.IMAGE_HT_tool_header.append(draw_header_button)
+    
+    bpy.utils.register_class(VIEW3D_PT_uv_seams_overlay)
+    bpy.types.VIEW3D_HT_tool_header.append(draw_3d_header_button)
 
 
 def unregister():
+    bpy.types.VIEW3D_HT_tool_header.remove(draw_3d_header_button)
+    bpy.utils.unregister_class(VIEW3D_PT_uv_seams_overlay)
+    
     bpy.types.IMAGE_HT_tool_header.remove(draw_header_button)
     bpy.utils.unregister_class(IMAGE_PT_uv_id_overlay)

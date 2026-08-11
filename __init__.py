@@ -258,6 +258,7 @@ if "bpy" in locals():
     importlib.reload(ops)
     importlib.reload(draw)
     importlib.reload(ui)
+    importlib.reload(draw_3d)
 else:
     from . import utils
     from . import offscreen
@@ -270,6 +271,7 @@ else:
     from . import ops
     from . import draw
     from . import ui
+    from . import draw_3d
 
 import bpy
 import bpy.utils.previews
@@ -301,8 +303,49 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
         update=update_debug_pref
     )
 
+    # 3D Seams Aesthetics
+    seams_3d_color: bpy.props.FloatVectorProperty(
+        name="Seam Color",
+        subtype='COLOR_GAMMA',
+        size=3,
+        default=(0.6235, 0.2510, 1.0),
+        min=0.0, max=1.0,
+        description="Color for UV seam lines in the 3D Viewport",
+    )
+    seams_3d_thickness: bpy.props.IntProperty(
+        name="Seam Thickness",
+        default=2,
+        min=1, max=6,
+        description="Line width for UV seam lines",
+    )
+    seams_3d_opacity: bpy.props.FloatProperty(
+        name="Seam Opacity",
+        default=0.85,
+        min=0.0, max=1.0,
+        subtype='FACTOR',
+        description="Opacity of UV seam lines in the 3D Viewport",
+    )
+    seams_3d_style: bpy.props.EnumProperty(
+        name="Seam Style",
+        items=[
+            ('SOLID', "Solid", "Draw continuous solid lines"),
+            ('DASHED', "Dash", "Draw dashed lines"),
+        ],
+        default='SOLID',
+        description="Line style for UV seams",
+    )
+
     def draw(self, context):
         layout = self.layout
+        
+        layout.label(text="UV Seam")
+        
+        row = layout.row(align=False)
+        row.prop(self, "seams_3d_style", text="")
+        row.prop(self, "seams_3d_thickness", text="Thickness")
+        row.prop(self, "seams_3d_color", text="")
+        
+        layout.separator()
         layout.prop(self, "debug")
 
 
@@ -342,6 +385,7 @@ def register():
     props.register()
     ops.register()
     draw.register()
+    draw_3d.register()
     ui.register()
 
 
@@ -353,6 +397,7 @@ def unregister():
     _cli_commands.clear()
 
     ui.unregister()
+    draw_3d.unregister()
     draw.unregister()
     ops.unregister()
     props.unregister()
