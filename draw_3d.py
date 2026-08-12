@@ -338,11 +338,23 @@ def _create_biased_solid_shader():
     info.vertex_source("""
 void main() {
     vec4 view_pos = ModelViewMatrix * vec4(pos, 1.0);
-    gl_Position = ProjectionMatrix * view_pos;
-    
+
     if (abs(ProjectionMatrix[3][3]) < 0.001) {
-        gl_Position.z -= (0.0005 * depth_bias_multiplier) * gl_Position.w;
+        // Perspective: a fixed NDC-space bias corresponds to a world-space
+        // push that grows ~quadratically with distance (hyperbolic depth
+        // buffer), so it x-rays far/zoomed-out geometry while barely being
+        // enough to beat z-fighting on close-up coincident faces.
+        //
+        // Instead bias in view space by a percentage of the vertex's own
+        // distance to camera, plus a small flat floor for close-range verts.
+        // view_pos.z is negative (facing -Z); adding a positive amount
+        // pulls it toward the camera.
+        float dist = -view_pos.z;
+        float bias = (dist * 0.0006 + 0.0005) * depth_bias_multiplier;
+        view_pos.z += bias;
+        gl_Position = ProjectionMatrix * view_pos;
     } else {
+        gl_Position = ProjectionMatrix * view_pos;
         gl_Position.z += (0.001 * depth_bias_multiplier) * ProjectionMatrix[2][2];
     }
 }
