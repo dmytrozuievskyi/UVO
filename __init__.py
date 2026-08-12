@@ -323,7 +323,7 @@ class UVOAddonPreferences(bpy.types.AddonPreferences):
         name="Seam Style",
         items=[
             ('SOLID', "Solid", "Draw continuous solid lines"),
-            ('DASHED', "Dash", "Draw dashed lines"),
+            ('OUTLINE', "Outline", "Draw seams as an outline under native edge colors"),
         ],
         default='SOLID',
         description="Line style for UV seams",

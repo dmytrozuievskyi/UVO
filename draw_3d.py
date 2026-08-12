@@ -100,17 +100,34 @@ def _extract_3d_boundary_edges(obj, bm, uv_layer):
     - It has < 2 linked faces (mesh boundary -> always a UV boundary), OR
     - The UV coordinates on the two sides don't match (UV split)
     
-    Returns: list of (co1, co2) tuples in world space.
+    Returns: (unselected_coords, selected_coords, active_coords)
     """
     mw = obj.matrix_world
-    boundary_coords = []
+    unsel_coords = []
+    sel_coords = []
+    act_coords = []
     
+    active_edge = None
+    if bm.select_history:
+        active_elem = bm.select_history.active
+        if isinstance(active_elem, bmesh.types.BMEdge):
+            active_edge = active_elem
+            
     for edge in bm.edges:
+        if edge.hide:
+            continue
+            
         if len(edge.link_faces) < 2:
             # Mesh boundary edge -> always a UV boundary
             co1 = mw @ edge.verts[0].co
             co2 = mw @ edge.verts[1].co
-            boundary_coords.append(((co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
+            if edge == active_edge:
+                coords = act_coords
+            elif edge.select:
+                coords = sel_coords
+            else:
+                coords = unsel_coords
+            coords.append(((co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
             continue
         
         if len(edge.link_faces) != 2:
@@ -149,9 +166,15 @@ def _extract_3d_boundary_edges(obj, bm, uv_layer):
         if not match:
             co1 = mw @ edge.verts[0].co
             co2 = mw @ edge.verts[1].co
-            boundary_coords.append(((co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
+            if edge == active_edge:
+                coords = act_coords
+            elif edge.select:
+                coords = sel_coords
+            else:
+                coords = unsel_coords
+            coords.append(((co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
     
-    return boundary_coords
+    return unsel_coords, sel_coords, act_coords
 
 def _ensure_3d_boundary_data(context):
     """Extract 3D boundary edges for all cached objects, if not already done."""
@@ -166,8 +189,10 @@ def _ensure_3d_boundary_data(context):
         
         bm = bmesh.from_edit_mesh(obj.data)
         uv_layer = bm.loops.layers.uv.verify()
-        cache['seam_3d_coords'] = _extract_3d_boundary_edges(obj, bm, uv_layer)
-        cache['seam_3d_batch'] = None  # invalidate batch
+        cache['seam_3d_coords_unsel'], cache['seam_3d_coords_sel'], cache['seam_3d_coords_act'] = _extract_3d_boundary_edges(obj, bm, uv_layer)
+        cache['seam_3d_batch_unsel'] = None
+        cache['seam_3d_batch_sel'] = None
+        cache['seam_3d_batch_act'] = None
 
 def draw_callback_3d():
     """SpaceView3D POST_VIEW draw callback. Runs once per viewport per frame."""
@@ -219,31 +244,78 @@ def draw_callback_3d():
             gpu.state.depth_test_set('LESS_EQUAL')
         
         gpu.state.blend_set('ALPHA')
-        gpu.state.line_width_set(float(thickness))
-        
         shader.bind()
-        shader.uniform_float("color", color)
-        
         shader.uniform_float("ModelViewMatrix", gpu.matrix.get_model_view_matrix())
         shader.uniform_float("ProjectionMatrix", gpu.matrix.get_projection_matrix())
         
-        # Draw each object's boundary edges
-        for name, cache in _draw._obj_cache.items():
-            coords = cache.get('seam_3d_coords')
-            if not coords:
-                continue
+        color_unsel = color
+        
+        # For selected, shift hue by 60 degrees
+        from mathutils import Color
+        c_sel = Color((color_unsel[0], color_unsel[1], color_unsel[2]))
+        h, s, v = c_sel.hsv
+        c_sel.hsv = ((h + (60.0 / 360.0)) % 1.0, s, v)
+        color_sel = (c_sel.r, c_sel.g, c_sel.b, color_unsel[3])
+        
+        # For active, keep the desaturated almost-white look
+        color_act = (
+            color_unsel[0] * 0.1 + 0.9,
+            color_unsel[1] * 0.1 + 0.9,
+            color_unsel[2] * 0.1 + 0.9,
+            color_unsel[3]
+        )
+        
+        theme = context.preferences.themes[0]
+        edge_width = getattr(theme.view_3d, 'edge_width', 1)
+        
+        def draw_batch(cache_key, batch_key, draw_color, depth_mult, line_width):
+            gpu.state.line_width_set(float(line_width))
+            shader.uniform_float("color", draw_color)
+            shader.uniform_float("depth_bias_multiplier", depth_mult)
             
-            # Lazy batch creation (must happen in draw context for GPU safety)
-            batch = cache.get('seam_3d_batch')
-            if batch is None:
-                flat_coords = []
-                for co1, co2 in coords:
-                    flat_coords.append(co1)
-                    flat_coords.append(co2)
-                batch = batch_for_shader(shader, 'LINES', {"pos": flat_coords})
-                cache['seam_3d_batch'] = batch
+            for name, cache in _draw._obj_cache.items():
+                coords = cache.get(cache_key)
+                if not coords:
+                    continue
+                
+                batch = cache.get(batch_key)
+                if batch is None:
+                    flat_coords = []
+                    for co1, co2 in coords:
+                        flat_coords.append(co1)
+                        flat_coords.append(co2)
+                    if flat_coords:
+                        batch = batch_for_shader(shader, 'LINES', {"pos": flat_coords})
+                    else:
+                        batch = False # Use False to cache empty state
+                    cache[batch_key] = batch
+                
+                if batch:
+                    batch.draw(shader)
+                    
+        if style == 'OUTLINE':
+            thickness_outer = float(edge_width + 5)
+            thickness_inner = float(edge_width)
             
-            batch.draw(shader)
+            # Draw thick background
+            draw_batch('seam_3d_coords_unsel', 'seam_3d_batch_unsel', color_unsel, 1.0, thickness_outer)
+            draw_batch('seam_3d_coords_sel', 'seam_3d_batch_sel', color_unsel, 1.0, thickness_outer)
+            draw_batch('seam_3d_coords_act', 'seam_3d_batch_act', color_unsel, 1.0, thickness_outer)
+            
+            # Draw thin inner line
+            wire_color = (*theme.view_3d.wire_edit[:3], color_unsel[3])
+            sel_color = (*theme.view_3d.edge_mode_select[:3], color_sel[3])
+            act_color = (*theme.view_3d.editmesh_active[:3], color_act[3])
+            
+            draw_batch('seam_3d_coords_unsel', 'seam_3d_batch_unsel', wire_color, 1.02, thickness_inner)
+            draw_batch('seam_3d_coords_sel', 'seam_3d_batch_sel', sel_color, 1.02, thickness_inner)
+            draw_batch('seam_3d_coords_act', 'seam_3d_batch_act', act_color, 1.02, thickness_inner)
+            
+        else:
+            thickness = float((edge_width * 2) + 1)
+            draw_batch('seam_3d_coords_unsel', 'seam_3d_batch_unsel', color_unsel, 1.0, thickness)
+            draw_batch('seam_3d_coords_sel', 'seam_3d_batch_sel', color_sel, 1.0, thickness)
+            draw_batch('seam_3d_coords_act', 'seam_3d_batch_act', color_act, 1.0, thickness)
     
     except Exception as e:
         import traceback
@@ -254,7 +326,6 @@ def draw_callback_3d():
         gpu.state.line_width_set(1.0)
 
 _shader_solid = None
-_shader_dashed = None   # placeholder
 
 def _create_biased_solid_shader():
     info = gpu.types.GPUShaderCreateInfo()
@@ -263,22 +334,16 @@ def _create_biased_solid_shader():
     info.push_constant('MAT4', "ModelViewMatrix")
     info.push_constant('MAT4', "ProjectionMatrix")
     info.push_constant('VEC4', "color")
+    info.push_constant('FLOAT', "depth_bias_multiplier")
     info.vertex_source("""
 void main() {
     vec4 view_pos = ModelViewMatrix * vec4(pos, 1.0);
     gl_Position = ProjectionMatrix * view_pos;
     
-    // Distinguish between Perspective and Orthographic projection
-    // Perspective matrices have ProjectionMatrix[3][3] == 0.0
     if (abs(ProjectionMatrix[3][3]) < 0.001) {
-        // Perspective: Original perfect bias scaled by depth (w)
-        gl_Position.z -= 0.002 * gl_Position.w;
+        gl_Position.z -= (0.0005 * depth_bias_multiplier) * gl_Position.w;
     } else {
-        // Orthographic: Exact mathematical equivalent of shifting the vertex 
-        // 1 millimeter towards the camera in view space. 
-        // (0.001 * ProjectionMatrix[2][2]) perfectly scales the depth bias 
-        // to the current orthographic clip range.
-        gl_Position.z += 0.001 * ProjectionMatrix[2][2];
+        gl_Position.z += (0.001 * depth_bias_multiplier) * ProjectionMatrix[2][2];
     }
 }
 """)
@@ -289,23 +354,14 @@ void main() {
 """)
     return gpu.shader.create_from_info(info)
 
-
 def _get_3d_shader(style):
     """Return the appropriate shader for the requested line style."""
-    global _shader_solid, _shader_dashed
+    global _shader_solid
     
-    if style == 'SOLID':
-        if _shader_solid is None:
-            _shader_solid = _create_biased_solid_shader()
-        return _shader_solid
-    
-    # placeholder for dashed shader
-    # elif style == 'DASHED':
-    #     if _shader_dashed is None:
-    #         _shader_dashed = _create_dashed_shader()
-    #     return _shader_dashed
-    
-    return _shader_solid  # fallback
+    if _shader_solid is None:
+        _shader_solid = _create_biased_solid_shader()
+        
+    return _shader_solid
 
 def any_viewport_active():
     """Return True if any viewport has the seams overlay enabled."""
@@ -315,8 +371,12 @@ def invalidate_3d_boundaries():
     """Clear cached 3D boundary data for all objects (forces re-extraction)."""
     from . import draw as _draw
     for cache in _draw._obj_cache.values():
-        cache['seam_3d_coords'] = None
-        cache['seam_3d_batch'] = None
+        cache['seam_3d_coords_unsel'] = None
+        cache['seam_3d_coords_sel'] = None
+        cache['seam_3d_coords_act'] = None
+        cache['seam_3d_batch_unsel'] = None
+        cache['seam_3d_batch_sel'] = None
+        cache['seam_3d_batch_act'] = None
 
 def tag_3d_redraw():
     """Tag all 3D viewports with active overlay for redraw."""
@@ -338,7 +398,7 @@ def register():
     )
 
 def unregister():
-    global _draw_handler_3d, _shader_solid, _shader_dashed
+    global _draw_handler_3d, _shader_solid
     
     # Restore native seams in all viewports before removing handler
     _restore_all_native_seams()
@@ -349,7 +409,6 @@ def unregister():
     
     _viewport_states.clear()
     _shader_solid = None
-    _shader_dashed = None
 
 def _restore_all_native_seams():
     """On addon disable/unregister, restore ALL saved native seam states."""
