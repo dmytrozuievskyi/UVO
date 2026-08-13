@@ -176,23 +176,74 @@ def _extract_3d_boundary_edges(obj, bm, uv_layer):
     
     return unsel_coords, sel_coords, act_coords
 
-def _ensure_3d_boundary_data(context):
-    """Extract 3D boundary edges for all cached objects, if not already done."""
-    from . import draw as _draw
+_is_extracting = False
+
+def _safe_update_seam_data(context, reason="unknown"):
+    """Re-extract 3D seam boundary data using safe BMesh copies."""
+    global _is_extracting
+    if _is_extracting:
+        return
+    _is_extracting = True
     
-    for obj in context.scene.objects:
-        if obj.type != 'MESH' or obj.mode != 'EDIT':
-            continue
-        cache = _draw._obj_cache.get(obj.name)
-        if cache is None or cache.get('seam_3d_coords') is not None:
-            continue
+    try:
+        from . import draw as _draw
+        import time
+        total_work_ms = 0.0
+        total_segments = 0
+        obj_count = 0
         
-        bm = bmesh.from_edit_mesh(obj.data)
-        uv_layer = bm.loops.layers.uv.verify()
-        cache['seam_3d_coords_unsel'], cache['seam_3d_coords_sel'], cache['seam_3d_coords_act'] = _extract_3d_boundary_edges(obj, bm, uv_layer)
-        cache['seam_3d_batch_unsel'] = None
-        cache['seam_3d_batch_sel'] = None
-        cache['seam_3d_batch_act'] = None
+        for obj in context.scene.objects:
+            if obj.type != 'MESH' or obj.mode != 'EDIT':
+                continue
+            cache = _draw._obj_cache.get(obj.name)
+            if cache is None:
+                continue
+            
+            t_obj_start = time.perf_counter()
+            bm_copy = None
+            try:
+                bm_live = bmesh.from_edit_mesh(obj.data)
+                
+                t_copy_start = time.perf_counter()
+                bm_copy = bm_live.copy()
+                t_copy_end = time.perf_counter()
+                
+                uv_layer = bm_copy.loops.layers.uv.verify()
+                bm_copy.edges.ensure_lookup_table()
+                
+                t_extract_start = time.perf_counter()
+                unsel, sel, act = _extract_3d_boundary_edges(obj, bm_copy, uv_layer)
+                t_extract_end = time.perf_counter()
+                
+                segs = (len(unsel) + len(sel) + len(act)) // 2
+                total_segments += segs
+                
+                cache['seam_3d_coords_unsel'] = unsel
+                cache['seam_3d_coords_sel'] = sel
+                cache['seam_3d_coords_act'] = act
+                cache['seam_3d_batch_unsel'] = None
+                cache['seam_3d_batch_sel'] = None
+                cache['seam_3d_batch_act'] = None
+                
+                t_obj_end = time.perf_counter()
+                obj_ms = (t_obj_end - t_obj_start) * 1000
+                total_work_ms += obj_ms
+                obj_count += 1
+                print(f"[UVO] seams_3d ({reason}) '{obj.name}': copy={(t_copy_end - t_copy_start)*1000:.1f}ms, extract={(t_extract_end - t_extract_start)*1000:.1f}ms, total={obj_ms:.1f}ms ({segs} segs)")
+            except Exception:
+                pass
+            finally:
+                if bm_copy is not None:
+                    bm_copy.free()
+                    
+        if obj_count > 0:
+            print(f"[UVO] seams_3d ({reason}) Done: {obj_count} obj(s), {total_segments} segs, work={total_work_ms:.1f}ms")
+    finally:
+        _is_extracting = False
+
+def _ensure_3d_boundary_data(context):
+    """Populates seam data for cached objects that lack it."""
+    _safe_update_seam_data(context, reason="toggle")
 
 def draw_callback_3d():
     """SpaceView3D POST_VIEW draw callback. Runs once per viewport per frame."""
@@ -216,8 +267,9 @@ def draw_callback_3d():
     # Periodic stale viewport cleanup (cheap, small dict)
     _cleanup_stale_viewports()
     
-    # Ensure boundary data is extracted
-    _ensure_3d_boundary_data(context)
+    # do not call _ensure_3d_boundary_data()
+    # BMesh access inside a GPU draw callback is unsafe when modal operators are active in another viewport.
+    # Boundary data is extracted in depsgraph_update_handler instead
     
     # Get preferences
     prefs = context.preferences.addons[__package__].preferences
@@ -386,6 +438,14 @@ def invalidate_3d_boundaries():
         cache['seam_3d_coords_unsel'] = None
         cache['seam_3d_coords_sel'] = None
         cache['seam_3d_coords_act'] = None
+        cache['seam_3d_batch_unsel'] = None
+        cache['seam_3d_batch_sel'] = None
+        cache['seam_3d_batch_act'] = None
+
+def invalidate_3d_batches():
+    """Clear only GPU batch objects (keeps coord data). Forces batch rebuild on next draw."""
+    from . import draw as _draw
+    for cache in _draw._obj_cache.values():
         cache['seam_3d_batch_unsel'] = None
         cache['seam_3d_batch_sel'] = None
         cache['seam_3d_batch_act'] = None
