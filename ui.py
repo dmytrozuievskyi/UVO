@@ -219,6 +219,22 @@ class VIEW3D_PT_uv_seams_overlay(bpy.types.Panel):
         split_seam = content_seam.split(factor=0.5, align=False)
         split_seam.prop(props, "seams_3d_mode", text="")
         split_seam.prop(prefs, "seams_3d_opacity", text="", slider=True)
+        
+        if vp_enabled and active:
+            has_mod = False
+            for obj in context.objects_in_mode:
+                if obj.type == 'MESH':
+                    for mod in obj.modifiers:
+                        if getattr(mod, 'show_on_cage', False):
+                            has_mod = True
+                            break
+                if has_mod:
+                    break
+            if has_mod:
+                layout.separator()
+                warn = layout.row(align=True)
+                warn.alert = True
+                warn.label(text="Active modifiers may misalign overlay", icon='ERROR')
 
 
 def draw_3d_header_button(self, context):
