@@ -6,6 +6,44 @@ from gpu_extras.batch import batch_for_shader
 # Module-level state
 _viewport_states = {}   # {space_ptr: ViewportState}
 _draw_handler_3d = None  # single SpaceView3D draw handler (always registered)
+_seam_cache = {}        # {obj_name: {coords_unsel, coords_sel, coords_act, batch_unsel, batch_sel, batch_act}}
+
+
+
+from bpy.app.handlers import persistent
+
+@persistent
+def _depsgraph_update_handler_3d(scene, depsgraph):
+    if not any_viewport_active():
+        return
+        
+    if bpy.context.mode != 'EDIT_MESH':
+        if _seam_cache:
+            _seam_cache.clear()
+        return
+        
+    # Check if this update needs extraction
+    changed_meshes = set()
+    geometry_changed = False
+    
+    for u in depsgraph.updates:
+        if isinstance(u.id, bpy.types.Mesh):
+            changed_meshes.add(u.id.name)
+            if u.is_updated_geometry:
+                geometry_changed = True
+        elif isinstance(u.id, bpy.types.Object) and u.id.type == 'MESH':
+            changed_meshes.add(u.id.name)
+            if u.id.data:
+                changed_meshes.add(u.id.data.name)
+            if u.is_updated_geometry:
+                geometry_changed = True
+                
+    if not changed_meshes:
+        return
+        
+    reason = "geometry" if geometry_changed else "selection"
+    _safe_update_seam_data(bpy.context, reason=reason, changed_meshes=changed_meshes)
+    tag_3d_redraw()
 
 class ViewportState:
     """Per-viewport overlay state."""
@@ -178,7 +216,7 @@ def _extract_3d_boundary_edges(obj, bm, uv_layer):
 
 _is_extracting = False
 
-def _safe_update_seam_data(context, reason="unknown"):
+def _safe_update_seam_data(context, reason="unknown", changed_meshes=None):
     """Re-extract 3D seam boundary data using safe BMesh copies."""
     global _is_extracting
     if _is_extracting:
@@ -186,7 +224,6 @@ def _safe_update_seam_data(context, reason="unknown"):
     _is_extracting = True
     
     try:
-        from . import draw as _draw
         import time
         total_work_ms = 0.0
         total_segments = 0
@@ -195,9 +232,12 @@ def _safe_update_seam_data(context, reason="unknown"):
         for obj in context.scene.objects:
             if obj.type != 'MESH' or obj.mode != 'EDIT':
                 continue
-            cache = _draw._obj_cache.get(obj.name)
-            if cache is None:
-                continue
+                
+            # If we know which meshes changed, only update those
+            # (unless it's a toggle, then we check if it's in cache)
+            if changed_meshes is not None and obj.name not in changed_meshes and obj.data.name not in changed_meshes:
+                if obj.name in _seam_cache:
+                    continue
             
             t_obj_start = time.perf_counter()
             bm_copy = None
@@ -218,6 +258,7 @@ def _safe_update_seam_data(context, reason="unknown"):
                 segs = (len(unsel) + len(sel) + len(act)) // 2
                 total_segments += segs
                 
+                cache = _seam_cache.setdefault(obj.name, {})
                 cache['seam_3d_coords_unsel'] = unsel
                 cache['seam_3d_coords_sel'] = sel
                 cache['seam_3d_coords_act'] = act
@@ -286,8 +327,6 @@ def draw_callback_3d():
     if shader is None:
         return
     
-    from . import draw as _draw
-    
     try:
         # Depth Testing & X-Ray
         if space.shading.show_xray:
@@ -325,7 +364,7 @@ def draw_callback_3d():
             shader.uniform_float("color", draw_color)
             shader.uniform_float("depth_bias_multiplier", depth_mult)
             
-            for name, cache in _draw._obj_cache.items():
+            for name, cache in _seam_cache.items():
                 coords = cache.get(cache_key)
                 if not coords:
                     continue
@@ -433,8 +472,7 @@ def any_viewport_active():
 
 def invalidate_3d_boundaries():
     """Clear cached 3D boundary data for all objects (forces re-extraction)."""
-    from . import draw as _draw
-    for cache in _draw._obj_cache.values():
+    for cache in _seam_cache.values():
         cache['seam_3d_coords_unsel'] = None
         cache['seam_3d_coords_sel'] = None
         cache['seam_3d_coords_act'] = None
@@ -444,8 +482,7 @@ def invalidate_3d_boundaries():
 
 def invalidate_3d_batches():
     """Clear only GPU batch objects (keeps coord data). Forces batch rebuild on next draw."""
-    from . import draw as _draw
-    for cache in _draw._obj_cache.values():
+    for cache in _seam_cache.values():
         cache['seam_3d_batch_unsel'] = None
         cache['seam_3d_batch_sel'] = None
         cache['seam_3d_batch_act'] = None
@@ -468,6 +505,8 @@ def register():
     _draw_handler_3d = bpy.types.SpaceView3D.draw_handler_add(
         draw_callback_3d, (), 'WINDOW', 'POST_VIEW'
     )
+    if _depsgraph_update_handler_3d not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_depsgraph_update_handler_3d)
 
 def unregister():
     global _draw_handler_3d, _shader_solid
@@ -478,8 +517,12 @@ def unregister():
     if _draw_handler_3d is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handler_3d, 'WINDOW')
         _draw_handler_3d = None
+        
+    if _depsgraph_update_handler_3d in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_depsgraph_update_handler_3d)
     
     _viewport_states.clear()
+    _seam_cache.clear()
     _shader_solid = None
 
 def _restore_all_native_seams():

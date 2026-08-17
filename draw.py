@@ -149,27 +149,25 @@ def _mesh_connected_groups(bm):
 def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     obj_index=0, total_objs=1,
                     group_offset=0, total_global_groups=1,
-                    precomputed_groups=None,
-                    seams_3d_active=False):
+                    precomputed_groups=None):
     _t_start = time.perf_counter()
     if obj.mode != 'EDIT':
-        return None, None, None, None, None, None
+        return None, None, None, None, None
     bm_copy = None
     try:
         bm_live = bmesh.from_edit_mesh(obj.data)
         bm_copy = bm_live.copy()
     except Exception:
-        return None, None, None, None, None, None
+        return None, None, None, None, None
 
     _t_copy = time.perf_counter()
     utils.log("timing_build", f"bm.copy: {(_t_copy - _t_start)*1000:.1f}ms")
 
     current_hash = None
-    seam_3d_data = None
     try:
         bm_copy.faces.ensure_lookup_table()
         if len(bm_copy.faces) == 0:
-            return None, None, None, None, None, None
+            return None, None, None, None, None
 
         uv_layer     = bm_copy.loops.layers.uv.verify()
         current_hash = _uv_hash(bm_copy, uv_layer)
@@ -180,7 +178,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
         cached = _obj_cache.get(obj.name)
         if cached and cached['hash'] == current_hash:
             utils.log("id_cache", f"{obj.name}: hit (hash={current_hash})")
-            return current_hash, None, None, None, None, None
+            return current_hash, None, None, None, None
 
         obj_seed = utils.get_string_hash(obj.name)
         islands  = ix.extract_islands(
@@ -247,19 +245,13 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
         _t_groups = time.perf_counter()
         utils.log("timing_build", f"groups_and_coords: {(_t_groups - _t_extract)*1000:.1f}ms")
 
-        # Extract 3D seams safely using BMesh copy.
-        if seams_3d_active:
-            from . import draw_3d
-            bm_copy.edges.ensure_lookup_table()
-            seam_3d_data = draw_3d._extract_3d_boundary_edges(obj, bm_copy, uv_layer)
-
         # Batch compilation is deferred to draw_callback for safety during file load
-        return current_hash, None, islands, list(coords), list(colors), seam_3d_data
+        return current_hash, None, islands, list(coords), list(colors)
 
     except Exception as e:
         utils.log("build", f"error ({obj.name}): {e}")
         traceback.print_exc()
-        return current_hash, None, None, None, None, None
+        return current_hash, None, None, None, None
     finally:
         if bm_copy:
             bm_copy.free()
@@ -963,27 +955,17 @@ def update_batches_safe(context):
                 total_global_groups    += n
             total_global_groups = max(total_global_groups, 1)
 
-        from . import draw_3d
-        _seams_3d_active = draw_3d.any_viewport_active()
-
         for obj_index, obj in enumerate(edit_objs):
             active_names.add(obj.name)
 
-            new_hash, new_id_batch, new_islands, new_id_coords, new_id_rgba, seam_3d_data = _build_obj_data(
+            new_hash, new_id_batch, new_islands, new_id_coords, new_id_rgba = _build_obj_data(
                 obj, uv_id_mode, uv_id_alpha, obj_index, total_objs,
                 group_offset=group_offsets.get(obj.name, 0),
                 total_global_groups=total_global_groups,
                 precomputed_groups=precomp_groups.get(obj.name),
-                seams_3d_active=_seams_3d_active,
             )
 
             if new_islands is not None:
-                # Unpack seam data if extraction was done
-                if seam_3d_data is not None:
-                    s3d_unsel, s3d_sel, s3d_act = seam_3d_data
-                else:
-                    s3d_unsel = s3d_sel = s3d_act = None
-
                 _obj_cache[obj.name] = {
                     'hash':      new_hash,
                     'id_batch':  new_id_batch,
@@ -993,12 +975,6 @@ def update_batches_safe(context):
                     'tex_w':     float(obj.uv_id_props.tex_res_x),
                     'tex_h':     float(obj.uv_id_props.tex_res_y),
                     'target_texel': float(obj.uv_id_props.stretch_internal_texel),
-                    'seam_3d_coords_unsel': s3d_unsel,
-                    'seam_3d_coords_sel':   s3d_sel,
-                    'seam_3d_coords_act':   s3d_act,
-                    'seam_3d_batch_unsel':  None,
-                    'seam_3d_batch_sel':    None,
-                    'seam_3d_batch_act':    None,
                 }
                 # Keep classify caches — worker needs previous state for pair-cache diffs.
                 any_changed = True
@@ -1058,15 +1034,9 @@ def update_batches_safe(context):
 @persistent
 def depsgraph_update_handler(scene, depsgraph):
     prop = getattr(scene, "uv_id_props", None)
-    
-    uv_overlays_active = (prop and not prop.is_muted and 
-                          (prop.show_uv_id or prop.show_intersect or 
-                           prop.show_padding or prop.show_stretch))
-    
-    from . import draw_3d
-    seams_3d_active = draw_3d.any_viewport_active()
-    
-    if not uv_overlays_active and not seams_3d_active:
+    if not prop or prop.is_muted:
+        return
+    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding and not prop.show_stretch:
         return
 
     if bpy.context.mode != 'EDIT_MESH':
@@ -1094,7 +1064,7 @@ def depsgraph_update_handler(scene, depsgraph):
 
     # Empty cache in edit mode → just entered edit or enabled an overlay.
     force_rebuild = False
-    if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch or seams_3d_active):
+    if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch):
         force_rebuild = True
 
 
@@ -1104,23 +1074,9 @@ def depsgraph_update_handler(scene, depsgraph):
                 force_rebuild = True
                 break
 
-    geometry_changed = any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
-                                     for u in depsgraph.updates)
-
-    # Update seam highlights on selection changes.
-    if seams_3d_active and not geometry_changed and not force_rebuild:
-        any_mesh_update = any(isinstance(u.id, bpy.types.Mesh) for u in depsgraph.updates)
-        if any_mesh_update:
-            draw_3d._safe_update_seam_data(bpy.context, reason="selection")
-            draw_3d.tag_3d_redraw()
-
-    if not force_rebuild and not geometry_changed:
+    if not force_rebuild and not any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
+                                     for u in depsgraph.updates):
         return
-
-    if seams_3d_active and (geometry_changed or force_rebuild):
-        # Immediate seam update using BMesh copy (safe for modal UV transforms).
-        draw_3d._safe_update_seam_data(bpy.context, reason="geometry")
-        draw_3d.tag_3d_redraw()
 
     def _do_rebuild():
         if not is_calculating:
