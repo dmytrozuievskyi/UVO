@@ -249,15 +249,106 @@ class VIEW3D_OT_toggle_uvo_3d_mute(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class VIEW3D_OT_select_uv_seams(bpy.types.Operator):
+    """Select similar edges based on their UV map boundary status"""
+    bl_idname = "view3d.select_uv_seams"
+    bl_label = "Seam UVO"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_MESH'
+        
+    def execute(self, context):
+        import bmesh
+        
+        objects = context.objects_in_mode
+        if not objects:
+            return {'CANCELLED'}
+            
+        def is_uv_seam(edge, uv_layer):
+            if len(edge.link_faces) < 2:
+                return True
+            if len(edge.link_faces) != 2:
+                return False
+                
+            f1, f2 = edge.link_faces[0], edge.link_faces[1]
+            l1 = l2 = None
+            for loop in f1.loops:
+                if loop.edge == edge:
+                    l1 = loop
+                    break
+            for loop in f2.loops:
+                if loop.edge == edge:
+                    l2 = loop
+                    break
+            if l1 is None or l2 is None:
+                return False
+                
+            uv1a = l1[uv_layer].uv
+            uv1b = l1.link_loop_next[uv_layer].uv
+            uv2a = l2[uv_layer].uv
+            uv2b = l2.link_loop_next[uv_layer].uv
+            
+            UV_EPS = 1e-4
+            match = (
+                (abs(uv1a.x - uv2a.x) < UV_EPS and abs(uv1a.y - uv2a.y) < UV_EPS and
+                 abs(uv1b.x - uv2b.x) < UV_EPS and abs(uv1b.y - uv2b.y) < UV_EPS) or
+                (abs(uv1a.x - uv2b.x) < UV_EPS and abs(uv1a.y - uv2b.y) < UV_EPS and
+                 abs(uv1b.x - uv2a.x) < UV_EPS and abs(uv1b.y - uv2a.y) < UV_EPS)
+            )
+            return not match
+            
+        for obj in objects:
+            if obj.type != 'MESH':
+                continue
+                
+            bm = bmesh.from_edit_mesh(obj.data)
+            uv_layer = bm.loops.layers.uv.verify()
+            
+            active_edge = bm.select_history.active
+            if not isinstance(active_edge, bmesh.types.BMEdge):
+                selected_edges = [e for e in bm.edges if e.select]
+                active_edge = selected_edges[-1] if selected_edges else None
+                
+            # If no edge is selected at all, default to selecting all seams
+            target_is_seam = True
+            if active_edge:
+                target_is_seam = is_uv_seam(active_edge, uv_layer)
+            
+            for edge in bm.edges:
+                if edge.hide:
+                    continue
+                
+                edge_is_seam = is_uv_seam(edge, uv_layer)
+                if edge_is_seam == target_is_seam:
+                    edge.select = True
+                    
+            bmesh.update_edit_mesh(obj.data)
+            
+        for area in context.screen.areas:
+            area.tag_redraw()
+            
+        return {'FINISHED'}
+
+
+def draw_select_similar_uv_seams(self, context):
+    self.layout.operator("view3d.select_uv_seams", text="Seam UVO")
+
+
 def register():
     bpy.utils.register_class(UV_OT_ToggleOverlay)
     bpy.utils.register_class(UV_OT_RefreshOverlay)
     bpy.utils.register_class(UV_OT_SampleStretchTexel)
     bpy.utils.register_class(VIEW3D_OT_toggle_uv_seams_overlay)
     bpy.utils.register_class(VIEW3D_OT_toggle_uvo_3d_mute)
+    bpy.utils.register_class(VIEW3D_OT_select_uv_seams)
+    bpy.types.VIEW3D_MT_edit_mesh_select_similar.append(draw_select_similar_uv_seams)
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_edit_mesh_select_similar.remove(draw_select_similar_uv_seams)
+    bpy.utils.unregister_class(VIEW3D_OT_select_uv_seams)
     bpy.utils.unregister_class(VIEW3D_OT_toggle_uvo_3d_mute)
     bpy.utils.unregister_class(VIEW3D_OT_toggle_uv_seams_overlay)
     bpy.utils.unregister_class(UV_OT_SampleStretchTexel)
