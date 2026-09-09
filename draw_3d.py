@@ -141,9 +141,7 @@ def _extract_3d_boundary_edges(obj, bm, uv_layer):
     Returns: (unselected_coords, selected_coords, active_coords)
     """
     mw = obj.matrix_world
-    unsel_coords = []
-    sel_coords = []
-    act_coords = []
+    all_edges = []
     
     active_edge = None
     if bm.select_history:
@@ -160,12 +158,12 @@ def _extract_3d_boundary_edges(obj, bm, uv_layer):
             co1 = mw @ edge.verts[0].co
             co2 = mw @ edge.verts[1].co
             if edge == active_edge:
-                coords = act_coords
+                state = 2
             elif edge.select:
-                coords = sel_coords
+                state = 1
             else:
-                coords = unsel_coords
-            coords.append(((co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
+                state = 0
+            all_edges.append((state, (co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
             continue
         
         if len(edge.link_faces) != 2:
@@ -205,14 +203,14 @@ def _extract_3d_boundary_edges(obj, bm, uv_layer):
             co1 = mw @ edge.verts[0].co
             co2 = mw @ edge.verts[1].co
             if edge == active_edge:
-                coords = act_coords
+                state = 2
             elif edge.select:
-                coords = sel_coords
+                state = 1
             else:
-                coords = unsel_coords
-            coords.append(((co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
-    
-    return unsel_coords, sel_coords, act_coords
+                state = 0
+            all_edges.append((state, (co1.x, co1.y, co1.z), (co2.x, co2.y, co2.z)))
+            
+    return all_edges
 
 _is_extracting = False
 
@@ -252,16 +250,110 @@ def _safe_update_seam_data(context, reason="unknown", changed_meshes=None):
                 bm_copy.edges.ensure_lookup_table()
                 
                 t_extract_start = time.perf_counter()
-                unsel, sel, act = _extract_3d_boundary_edges(obj, bm_copy, uv_layer)
+                all_edges = _extract_3d_boundary_edges(obj, bm_copy, uv_layer)
+                
+                import math
+                sorted_edges = sorted(all_edges, key=lambda x: (
+                    round(x[1][0],4), round(x[1][1],4), round(x[1][2],4),
+                    round(x[2][0],4), round(x[2][1],4), round(x[2][2],4)
+                ))
+                
+                vert_to_edges = {}
+                for i, (state, co1, co2) in enumerate(sorted_edges):
+                    k1 = (round(co1[0], 4), round(co1[1], 4), round(co1[2], 4))
+                    k2 = (round(co2[0], 4), round(co2[1], 4), round(co2[2], 4))
+                    vert_to_edges.setdefault(k1, []).append((i, k2, co1, co2, state))
+                    vert_to_edges.setdefault(k2, []).append((i, k1, co2, co1, state))
+                    
+                for k in vert_to_edges:
+                    vert_to_edges[k].sort(key=lambda x: x[1])
+                    
+                visited_edges = set()
+                
+                unsel_data = []
+                sel_data = []
+                act_data = []
+                
+                for i, (state, co1, co2) in enumerate(sorted_edges):
+                    if i in visited_edges:
+                        continue
+                        
+                    k1 = (round(co1[0], 4), round(co1[1], 4), round(co1[2], 4))
+                    k2 = (round(co2[0], 4), round(co2[1], 4), round(co2[2], 4))
+                    
+                    curr_k = k2
+                    curr_edge_idx = i
+                    path_edges_forward = []
+                    while True:
+                        visited_edges.add(curr_edge_idx)
+                        
+                        # SMART BREAK POINT: Stop chaining if this vertex is a junction (degree != 2)
+                        # This prevents edits from rippling across the entire mesh
+                        if len(vert_to_edges.get(curr_k, [])) != 2:
+                            break
+                            
+                        next_edge = None
+                        for edge_idx, other_k, my_co, other_co, e_state in vert_to_edges.get(curr_k, []):
+                            if edge_idx not in visited_edges:
+                                next_edge = (edge_idx, other_k, my_co, other_co, e_state)
+                                break
+                        if next_edge is None:
+                            break
+                        path_edges_forward.append(next_edge)
+                        curr_edge_idx = next_edge[0]
+                        curr_k = next_edge[1]
+                        
+                    curr_k = k1
+                    curr_edge_idx = i
+                    path_edges_backward = []
+                    while True:
+                        visited_edges.add(curr_edge_idx)
+                        
+                        if len(vert_to_edges.get(curr_k, [])) != 2:
+                            break
+                            
+                        next_edge = None
+                        for edge_idx, other_k, my_co, other_co, e_state in vert_to_edges.get(curr_k, []):
+                            if edge_idx not in visited_edges:
+                                next_edge = (edge_idx, other_k, my_co, other_co, e_state)
+                                break
+                        if next_edge is None:
+                            break
+                        path_edges_backward.append(next_edge)
+                        curr_edge_idx = next_edge[0]
+                        curr_k = next_edge[1]
+                        
+                    # Assemble the continuous chain of segments
+                    # format: (state, co1, co2)
+                    chain_segments = []
+                    for e in path_edges_backward[::-1]:
+                        chain_segments.append((e[4], e[3], e[2])) # reverse order of verts
+                    chain_segments.append((state, co1, co2))
+                    for e in path_edges_forward:
+                        chain_segments.append((e[4], e[2], e[3]))
+                        
+                    # Calculate arc length along this chain
+                    current_arc = 0.0
+                    for e_state, v_a, v_b in chain_segments:
+                        dx = v_b[0] - v_a[0]
+                        dy = v_b[1] - v_a[1]
+                        dz = v_b[2] - v_a[2]
+                        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        
+                        target_list = act_data if e_state == 2 else (sel_data if e_state == 1 else unsel_data)
+                        target_list.append((v_a, v_b, current_arc, current_arc + dist))
+                        
+                        current_arc += dist
+
                 t_extract_end = time.perf_counter()
                 
-                segs = (len(unsel) + len(sel) + len(act)) // 2
+                segs = len(all_edges)
                 total_segments += segs
                 
                 cache = _seam_cache.setdefault(obj.name, {})
-                cache['seam_3d_coords_unsel'] = unsel
-                cache['seam_3d_coords_sel'] = sel
-                cache['seam_3d_coords_act'] = act
+                cache['seam_3d_coords_unsel'] = unsel_data
+                cache['seam_3d_coords_sel'] = sel_data
+                cache['seam_3d_coords_act'] = act_data
                 cache['seam_3d_batch_unsel'] = None
                 cache['seam_3d_batch_sel'] = None
                 cache['seam_3d_batch_act'] = None
@@ -372,11 +464,20 @@ def draw_callback_3d():
                 batch = cache.get(batch_key)
                 if batch is None:
                     flat_coords = []
-                    for co1, co2 in coords:
-                        flat_coords.append(co1)
-                        flat_coords.append(co2)
+                    flat_arc = []
+                    
+                    for v_a, v_b, arc_a, arc_b in coords:
+                        flat_coords.append(v_a)
+                        flat_coords.append(v_b)
+                        flat_arc.append(arc_a)
+                        flat_arc.append(arc_b)
+                        
                     if flat_coords:
-                        batch = batch_for_shader(shader, 'LINES', {"pos": flat_coords})
+                        from gpu_extras.batch import batch_for_shader
+                        batch = batch_for_shader(shader, 'LINES', {
+                            "pos": flat_coords,
+                            "arc_length": flat_arc
+                        })
                     else:
                         batch = False # Use False to cache empty state
                     cache[batch_key] = batch
@@ -421,24 +522,24 @@ _shader_solid = None
 def _create_biased_solid_shader():
     info = gpu.types.GPUShaderCreateInfo()
     info.vertex_in(0, 'VEC3', "pos")
+    info.vertex_in(1, 'FLOAT', "arc_length") # Added so the batch layout matches even for solid
     info.fragment_out(0, 'VEC4', "fragColor")
     info.push_constant('MAT4', "ModelViewMatrix")
     info.push_constant('MAT4', "ProjectionMatrix")
     info.push_constant('VEC4', "color")
     info.push_constant('FLOAT', "depth_bias_multiplier")
+    
     info.vertex_source("""
 void main() {
     vec4 view_pos = ModelViewMatrix * vec4(pos, 1.0);
 
     if (abs(ProjectionMatrix[3][3]) < 0.001) {
-        // Perspective:
         float dist = length(view_pos.xyz);
-        float bias = (dist * 0.0002 + 0.0001) * depth_bias_multiplier;
+        float bias = (dist * 0.0006 + 0.0005) * depth_bias_multiplier;
         vec3 view_dir = view_pos.xyz / dist;
         view_pos.xyz -= view_dir * bias;
         gl_Position = ProjectionMatrix * view_pos;
     } else {
-        // Orthographic
         gl_Position = ProjectionMatrix * view_pos;
         gl_Position.z += (0.001 * depth_bias_multiplier) * ProjectionMatrix[2][2];
     }
@@ -451,14 +552,74 @@ void main() {
 """)
     return gpu.shader.create_from_info(info)
 
+def _create_biased_dashed_shader():
+    info = gpu.types.GPUShaderCreateInfo()
+    info.vertex_in(0, 'VEC3', "pos")
+    info.vertex_in(1, 'FLOAT', "arc_length")
+    info.fragment_out(0, 'VEC4', "fragColor")
+    info.push_constant('MAT4', "ModelViewMatrix")
+    info.push_constant('MAT4', "ProjectionMatrix")
+    info.push_constant('VEC4', "color")
+    info.push_constant('FLOAT', "depth_bias_multiplier")
+    
+    interface = gpu.types.GPUStageInterfaceInfo("arc_interface")
+    interface.smooth('FLOAT', "v_arc")
+    interface.flat('FLOAT', "v_dist")
+    info.vertex_out(interface)
+    
+    info.vertex_source("""
+void main() {
+    vec4 view_pos = ModelViewMatrix * vec4(pos, 1.0);
+    v_arc = arc_length;
+    
+    float dist = length(view_pos.xyz);
+    
+    bool is_persp = abs(ProjectionMatrix[3][3]) < 0.001;
+    if (is_persp) {
+        v_dist = abs(view_pos.z);
+        float bias = (dist * 0.0006 + 0.0005) * depth_bias_multiplier;
+        vec3 view_dir = view_pos.xyz / dist;
+        view_pos.xyz -= view_dir * bias;
+        gl_Position = ProjectionMatrix * view_pos;
+    } else {
+        // Orthographic: use zoom scale from the projection matrix, not distance to center
+        v_dist = 1.0 / abs(ProjectionMatrix[0][0]);
+        gl_Position = ProjectionMatrix * view_pos;
+        gl_Position.z += (0.001 * depth_bias_multiplier) * ProjectionMatrix[2][2];
+    }
+}
+""")
+    info.fragment_source("""
+void main() {
+    // Infinite stepped scaling based on distance to camera
+    // This doubles the dash size every time the distance doubles, scaling infinitely in both directions
+    float base_dash = 0.02; // Base size in meters at 1m distance
+    float scale = exp2(floor(log2(max(v_dist, 0.001)))); 
+    float dash_size = base_dash * scale;
+
+    if (mod(v_arc, dash_size * 2.0) > dash_size) {
+        discard;
+    }
+    fragColor = color;
+}
+""")
+    return gpu.shader.create_from_info(info)
+
+_shader_solid = None
+_shader_dashed = None
+
 def _get_3d_shader(style):
     """Return the appropriate shader for the requested line style."""
-    global _shader_solid
+    global _shader_solid, _shader_dashed
     
-    if _shader_solid is None:
-        _shader_solid = _create_biased_solid_shader()
-        
-    return _shader_solid
+    if style == 'DASHED':
+        if _shader_dashed is None:
+            _shader_dashed = _create_biased_dashed_shader()
+        return _shader_dashed
+    else:
+        if _shader_solid is None:
+            _shader_solid = _create_biased_solid_shader()
+        return _shader_solid
 
 def any_viewport_active():
     """Return True if any viewport has the seams overlay enabled."""
