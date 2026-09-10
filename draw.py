@@ -122,6 +122,16 @@ def _uv_hash(bm, uv_layer):
             h = (h * 1000003 ^ hash(_pack('2f', uv.x, uv.y))) & 0xFFFFFFFFFFFFFFFF
     return h
 
+def _geo_hash(bm):
+    # Order-sensitive rolling hash.
+    _pack = struct.pack
+    h = 0
+    for face in bm.faces:
+        for loop in face.loops:
+            co = loop.vert.co
+            h = (h * 1000003 ^ hash(_pack('3f', co.x, co.y, co.z))) & 0xFFFFFFFFFFFFFFFF
+    return h
+
 
 def _mesh_connected_groups(bm):
     """Group faces by 3D edge connectivity, ignoring UV seams."""
@@ -152,33 +162,47 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     precomputed_groups=None):
     _t_start = time.perf_counter()
     if obj.mode != 'EDIT':
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     bm_copy = None
     try:
         bm_live = bmesh.from_edit_mesh(obj.data)
         bm_copy = bm_live.copy()
     except Exception:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     _t_copy = time.perf_counter()
     utils.log("timing_build", f"bm.copy: {(_t_copy - _t_start)*1000:.1f}ms")
 
-    current_hash = None
+    current_uv_hash = None
+    current_geo_hash = None
     try:
         bm_copy.faces.ensure_lookup_table()
+        ngons = [f for f in bm_copy.faces if len(f.verts) > 4]
+        if ngons:
+            bmesh.ops.triangulate(bm_copy, faces=ngons)
+        
+        bm_copy.faces.ensure_lookup_table()
+        bm_copy.faces.index_update()
+        bm_copy.edges.ensure_lookup_table()
+        bm_copy.edges.index_update()
+        bm_copy.verts.ensure_lookup_table()
+        bm_copy.verts.index_update()
         if len(bm_copy.faces) == 0:
             return None, None, None, None, None
 
         uv_layer     = bm_copy.loops.layers.uv.verify()
-        current_hash = _uv_hash(bm_copy, uv_layer)
+        current_uv_hash = _uv_hash(bm_copy, uv_layer)
+        current_geo_hash = _geo_hash(bm_copy)
         
         _t_hash = time.perf_counter()
-        utils.log("timing_build", f"_uv_hash: {(_t_hash - _t_copy)*1000:.1f}ms")
+        utils.log("timing_build", f"_hashes: {(_t_hash - _t_copy)*1000:.1f}ms")
 
         cached = _obj_cache.get(obj.name)
-        if cached and cached['hash'] == current_hash:
-            utils.log("id_cache", f"{obj.name}: hit (hash={current_hash})")
-            return current_hash, None, None, None, None
+        uv_same = cached and cached.get('hash') == current_uv_hash
+        geo_same = cached and cached.get('geo_hash') == current_geo_hash
+        if uv_same and geo_same:
+            utils.log("id_cache", f"{obj.name}: hit (uv={current_uv_hash}, geo={current_geo_hash})")
+            return (current_uv_hash, current_geo_hash), None, None, None, None, None
 
         obj_seed = utils.get_string_hash(obj.name)
         islands  = ix.extract_islands(
@@ -196,62 +220,58 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 
         coords, colors = [], []
 
-        if uv_id_mode == 'OBJECT':
-            obj_col = utils.get_distinct_color(
-                obj_index, total_objs, seed_offset=0.0, alpha=uv_id_alpha
-            )
-            for isle in islands:
-                for tri in isle.tris:
-                    for v in tri:
-                        coords.append((v[0], v[1], 0.0))
-                        colors.append(obj_col)
-        else:
-            # CONNECTED: one colour per 3D-connected piece, global palette.
-            if precomputed_groups is _PREPASS_FAILED:
-                topo_groups = [set(f.index for f in bm_copy.faces)]
-            elif precomputed_groups is not None:
-                topo_groups = precomputed_groups
-            else:
-                topo_groups = _mesh_connected_groups(bm_copy)
-            utils.log("connected", (
-                f"{obj.name}: {len(topo_groups)} 3D-connected groups "
-                f"from {len(bm_copy.faces)} faces "
-                f"(global offset {group_offset}/{total_global_groups})"
-            ))
-            face_color = {}
-            for gi, group in enumerate(topo_groups):
-                col = utils.get_distinct_color(
-                    group_offset + gi, total_global_groups,
-                    seed_offset=0.0, alpha=uv_id_alpha
+        if uv_same and not geo_same:
+            # 3D position changed, but UVs didn't. We can reuse UV ID colours from cache.
+            if cached and cached.get('id_coords'):
+                coords = cached['id_coords']
+                colors = cached['id_rgba']
+        
+        if not coords:
+            if uv_id_mode == 'OBJECT':
+                obj_col = utils.get_distinct_color(
+                    obj_index, total_objs, seed_offset=0.0, alpha=uv_id_alpha
                 )
-                for fi in group:
-                    face_color[fi] = col
-
-            for face in bm_copy.faces:
-                col = face_color.get(face.index)
-                if col is None:
-                    continue
-                loops = face.loops
-                if len(loops) < 3:
-                    continue
-                uv0 = loops[0][uv_layer].uv
-                p0  = (uv0.x, uv0.y, 0.0)
-                for i in range(1, len(loops) - 1):
-                    uv1 = loops[i][uv_layer].uv
-                    uv2 = loops[i + 1][uv_layer].uv
-                    coords.extend((p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)))
-                    colors.extend((col, col, col))
+                for isle in islands:
+                    for tri in isle.tris:
+                        for v in tri:
+                            coords.append((v[0], v[1], 0.0))
+                            colors.append(obj_col)
+            else:
+                # CONNECTED: one colour per 3D-connected piece, global palette.
+                if precomputed_groups is _PREPASS_FAILED:
+                    topo_groups = [set(f.index for f in bm_copy.faces)]
+                elif precomputed_groups:
+                    topo_groups = precomputed_groups
+                else:
+                    topo_groups = _mesh_connected_groups(bm_copy)
+    
+                for gi, group in enumerate(topo_groups):
+                    global_idx = group_offset + gi
+                    col = utils.get_distinct_color(
+                        global_idx, total_global_groups, seed_offset=0.0, alpha=uv_id_alpha
+                    )
+                    for fidx in group:
+                        face = bm_copy.faces[fidx]
+                        loops = face.loops
+                        if len(loops) < 3:
+                            continue
+                        uv0 = loops[0][uv_layer].uv
+                        p0  = (uv0.x, uv0.y, 0.0)
+                        for i in range(1, len(loops) - 1):
+                            uv1 = loops[i][uv_layer].uv
+                            uv2 = loops[i + 1][uv_layer].uv
+                            coords.extend((p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)))
+                            colors.extend((col, col, col))
 
         _t_groups = time.perf_counter()
         utils.log("timing_build", f"groups_and_coords: {(_t_groups - _t_extract)*1000:.1f}ms")
 
         # Batch compilation is deferred to draw_callback for safety during file load
-        return current_hash, None, islands, list(coords), list(colors)
+        return (current_uv_hash, current_geo_hash), None, islands, list(coords), list(colors), len(bm_copy.faces)
 
     except Exception as e:
         utils.log("build", f"error ({obj.name}): {e}")
-        traceback.print_exc()
-        return current_hash, None, None, None, None
+        return (current_uv_hash, current_geo_hash), None, None, None, None, None
     finally:
         if bm_copy:
             bm_copy.free()
@@ -347,9 +367,10 @@ def _dispatch_worker_job(props):
         pkg.start_worker()
 
     do_classify = props.show_intersect and not props.is_muted
-    do_stretch  = props.show_stretch  and not props.is_muted
-
-
+    from . import draw_3d
+    props_3d = bpy.context.scene.uv_3d_seam_props
+    stretch_3d_active = draw_3d.any_viewport_stretch_active() and not props_3d.is_muted
+    do_stretch  = (props.show_stretch and not props.is_muted) or stretch_3d_active
     tiled = (props.intersect_uv_mode == 'TILED')
     objects, cross_prev = _serialize_islands_for_worker(tiled)
 
@@ -542,7 +563,7 @@ def _apply_worker_result(result):
     if 'stretch_results' in result:
         stretch_data = result.get('stretch_results', {})
         if stretch_data:
-            stretch.rebuild_from_worker_data(stretch_data)
+            stretch.rebuild_from_worker_data(stretch_data, _obj_cache, bpy.context)
         utils.log("async", f"stretch result applied, job_id={job_id}")
 
     _tag_redraw()
@@ -958,27 +979,34 @@ def update_batches_safe(context):
         for obj_index, obj in enumerate(edit_objs):
             active_names.add(obj.name)
 
-            new_hash, new_id_batch, new_islands, new_id_coords, new_id_rgba = _build_obj_data(
+            new_hashes, new_id_batch, new_islands, new_id_coords, new_id_rgba, new_face_count = _build_obj_data(
                 obj, uv_id_mode, uv_id_alpha, obj_index, total_objs,
                 group_offset=group_offsets.get(obj.name, 0),
                 total_global_groups=total_global_groups,
                 precomputed_groups=precomp_groups.get(obj.name),
             )
 
+            if new_hashes:
+                new_uv_hash, new_geo_hash = new_hashes
+            else:
+                new_uv_hash, new_geo_hash = None, None
+
             if new_islands is not None:
                 _obj_cache[obj.name] = {
-                    'hash':      new_hash,
+                    'hash':      new_uv_hash,
+                    'geo_hash':  new_geo_hash,
                     'id_batch':  new_id_batch,
                     'islands':   new_islands,
                     'id_coords': new_id_coords,
                     'id_rgba':   new_id_rgba,
+                    'face_count': new_face_count,
                     'tex_w':     float(obj.uv_id_props.tex_res_x),
                     'tex_h':     float(obj.uv_id_props.tex_res_y),
                     'target_texel': float(obj.uv_id_props.stretch_internal_texel),
                 }
                 # Keep classify caches — worker needs previous state for pair-cache diffs.
                 any_changed = True
-            elif new_hash is not None and obj.name not in _obj_cache:
+            elif new_uv_hash is not None and obj.name not in _obj_cache:
                 any_changed = True
 
         for name in list(_obj_cache):
@@ -991,10 +1019,15 @@ def update_batches_safe(context):
                 any_changed = True
 
 
+        props_3d = context.scene.uv_3d_seam_props
+        from . import draw_3d
+        stretch_3d_active = draw_3d.any_viewport_stretch_active() and not props_3d.is_muted
+
         needs_classify = props.show_intersect and not props.is_muted and (
             any_changed or (_intersect_batches['hatch'] is None and _result_timer_fn is None))
-        needs_stretch = props.show_stretch and not props.is_muted and (
-            any_changed or stretch._geo_batch is None)
+        
+        needs_stretch = ((props.show_stretch and not props.is_muted) or stretch_3d_active) and (
+            any_changed or stretch._geo_batch is None) # We'll need a better check for 3D batch later
 
         if needs_classify or needs_stretch:
             # Skip if worker already busy; poller will trigger redraw on completion.
@@ -1017,6 +1050,8 @@ def update_batches_safe(context):
             _intersect_batches['checker'] = None
         if not (props.show_stretch and not props.is_muted):
             stretch.clear()
+        if not stretch_3d_active:
+            stretch.clear_3d()
 
         if props.show_padding and not props.is_muted:
             if any_changed or padding.batches['ok'] is None:
@@ -1034,9 +1069,13 @@ def update_batches_safe(context):
 @persistent
 def depsgraph_update_handler(scene, depsgraph):
     prop = getattr(scene, "uv_id_props", None)
-    if not prop or prop.is_muted:
-        return
-    if not prop.show_uv_id and not prop.show_intersect and not prop.show_padding and not prop.show_stretch:
+    prop_3d = getattr(scene, "uv_3d_seam_props", None)
+    
+    uv_active = prop and not prop.is_muted and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch)
+    from . import draw_3d
+    stretch_3d_active = prop_3d and not prop_3d.is_muted and draw_3d.any_viewport_stretch_active()
+    
+    if not uv_active and not stretch_3d_active:
         return
 
     if bpy.context.mode != 'EDIT_MESH':
@@ -1048,6 +1087,7 @@ def depsgraph_update_handler(scene, depsgraph):
             _intersect_batches['checker'] = None
             padding.clear()
             stretch.clear()
+            stretch.clear_3d()
 
         global _inter_island_tris
         _inter_island_tris = []
@@ -1056,7 +1096,7 @@ def depsgraph_update_handler(scene, depsgraph):
         try:
             for window in bpy.context.window_manager.windows:
                 for area in window.screen.areas:
-                    if area.type == 'IMAGE_EDITOR':
+                    if area.type == 'IMAGE_EDITOR' or area.type == 'VIEW_3D':
                         area.tag_redraw()
         except Exception:
             pass
@@ -1064,7 +1104,7 @@ def depsgraph_update_handler(scene, depsgraph):
 
     # Empty cache in edit mode → just entered edit or enabled an overlay.
     force_rebuild = False
-    if not _obj_cache and (prop.show_uv_id or prop.show_intersect or prop.show_padding or prop.show_stretch):
+    if not _obj_cache and (uv_active or stretch_3d_active):
         force_rebuild = True
 
 
@@ -1073,10 +1113,12 @@ def depsgraph_update_handler(scene, depsgraph):
             if obj.type == 'MESH' and obj.mode == 'EDIT' and obj.name not in _obj_cache:
                 force_rebuild = True
                 break
+                
+    geometry_changed = any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh) for u in depsgraph.updates)
 
-    if not force_rebuild and not any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh)
-                                     for u in depsgraph.updates):
+    if not force_rebuild and not geometry_changed:
         return
+        
 
     def _do_rebuild():
         if not is_calculating:

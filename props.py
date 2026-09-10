@@ -441,6 +441,25 @@ class UV3DSeamProperties(bpy.types.PropertyGroup):
         update=update_seams_3d_mode,
     )
 
+    stretch_3d_mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=[
+            ('HEATMAP', "Heatmap", "Area & angle distortion"),
+            ('CHECKER', "Checker", "Checker pattern distortion"),
+            ('BOTH',    "Both",    "Heatmap tinted checker"),
+        ],
+        default='HEATMAP',
+        update=lambda self, context: context.area.tag_redraw() if context.area else None,
+    )
+
+    stretch_3d_opacity: bpy.props.FloatProperty(
+        default=0.75,
+        min=0.0, max=1.0,
+        name="Opacity",
+        description="Opacity of 3D stretch overlay",
+        update=lambda self, context: context.area.tag_redraw() if context.area else None,
+    )
+
 
 
 def register():

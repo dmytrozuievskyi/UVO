@@ -14,7 +14,7 @@ UV_DECIMAL = 3
 
 class Island:
     __slots__ = ('tris', 'aabb', 'uv_key', 'local_key', 'ref_a', 'ref_b', 'color', 'object_name',
-                 'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area')
+                 'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area', 'world_tris', 'face_indices')
 
     def __init__(self, tris, color, object_name=''):
         self.tris          = tris
@@ -26,6 +26,8 @@ class Island:
         self.ref_b         = (0.0, 0.0)
         self.boundary_segs = []
         self.jacobians     = []
+        self.world_tris    = []
+        self.face_indices  = []
         self.uv_area       = 0.0
         self.surface_area  = 0.0
 
@@ -144,15 +146,17 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
         island_faces = [bm_copy.faces[i] for i in face_index_set]
         
         ta = time.perf_counter()
-        tris, jacobians, uv_area, surf_area = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
+        tris, world_tris, jacobians, uv_area, surf_area = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
         tb = time.perf_counter()
         t_fan += (tb - ta)
 
         if tris:
             isle               = Island(tris, col, object_name)
+            isle.world_tris    = world_tris
             isle.jacobians     = jacobians
             isle.uv_area       = uv_area
             isle.surface_area  = surf_area
+            isle.face_indices  = list(face_index_set)
             
             tc = time.perf_counter()
             uv_key = _island_uv_key(island_faces, uv_layer)
@@ -188,6 +192,7 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
 
 def _fan_tris_and_data(faces, uv_layer, matrix_world):
     tris = []
+    world_tris = []
     jacobians = []
     total_uv_area = 0.0
     total_surf_area = 0.0
@@ -220,6 +225,9 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
 
 
             tris.append(((uv0.x, uv0.y), (uv1.x, uv1.y), (uv2.x, uv2.y)))
+            world_tris.append(((l0.vert.co.x, l0.vert.co.y, l0.vert.co.z), 
+                               (l1.vert.co.x, l1.vert.co.y, l1.vert.co.z), 
+                               (l2.vert.co.x, l2.vert.co.y, l2.vert.co.z)))
 
 
             eu = uv1 - uv0
@@ -265,7 +273,7 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
             M11 = (G + s) / t
             jacobians.append((M00, M01, M10, M11))
 
-    return tris, jacobians, total_uv_area, total_surf_area
+    return tris, world_tris, jacobians, total_uv_area, total_surf_area
 
 
 def _island_uv_key(faces, uv_layer):

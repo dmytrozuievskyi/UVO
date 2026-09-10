@@ -190,6 +190,8 @@ def compute_warped_uvs(isle, vert_M_sum, vert_area_sum, scale):
 
 _geo_batch = None
 _heatmap_batch = None
+_stretch_3d_cache = {}
+
 
 
 def rebuild(props, obj_cache, context):
@@ -200,25 +202,47 @@ def rebuild(props, obj_cache, context):
     global _geo_batch, _heatmap_batch
     _geo_batch = stretch_checker.build_geometry_batch(obj_cache, props)
     _heatmap_batch = stretch_heatmap.build_geometry_batch(obj_cache, props)
+    clear_3d()
 
 
-def rebuild_from_worker_data(results):
-    """Rebuild geometry batches from pre-computed worker data."""
+def rebuild_from_worker_data(results, obj_cache, context):
     from . import stretch_checker
     from . import stretch_heatmap
 
-    global _geo_batch, _heatmap_batch
+    global _geo_batch, _heatmap_batch, _stretch_3d_cache
 
     all_coords  = []
     all_warped  = []
     all_checker = []
     all_heatmap = []
 
-    for data in results.values():
+    for obj_name, data in results.items():
         all_coords.extend(data['coords'])
         all_warped.extend(data['warped_uvs'])
         all_checker.extend(data['checker_colors'])
         all_heatmap.extend(data['heatmap_colors'])
+        
+        if obj_name in obj_cache:
+            cache = obj_cache[obj_name]
+            world_coords = []
+            uv_coords = []
+            if cache.get('islands'):
+                for isle in cache['islands']:
+                    if hasattr(isle, 'world_tris') and isle.world_tris:
+                        for tri in isle.world_tris:
+                            world_coords.extend(tri)
+                    for tri in isle.tris:
+                        uv_coords.extend(tri)
+            
+            _stretch_3d_cache[obj_name] = {
+                'world_coords': world_coords,
+                'uv_coords': uv_coords,
+                'heatmap_colors': data['heatmap_colors'],
+                'checker_colors': data['checker_colors'],
+                'batch': None,
+                'batch_checker': None
+            }
+            print(f"[UVO] stretch.rebuild: Populated 3D cache for {obj_name} ({len(world_coords)} verts)")
 
     _geo_batch     = stretch_checker.build_batch_from_precomputed(all_coords, all_warped, all_checker)
     _heatmap_batch = stretch_heatmap.build_batch_from_precomputed(all_coords, all_heatmap)
@@ -252,3 +276,29 @@ def clear():
     _heatmap_batch = None
     stretch_checker.clear()
     stretch_heatmap.clear()
+    clear_3d()
+
+
+def draw_3d(props_3d, context):
+    from . import stretch_3d_heatmap
+    from . import stretch_3d_checker
+    
+    if not _stretch_3d_cache:
+        return
+        
+
+
+    mode = props_3d.stretch_3d_mode
+    opacity = props_3d.stretch_3d_opacity
+
+    if mode == 'HEATMAP':
+        stretch_3d_heatmap.draw(_stretch_3d_cache, opacity)
+    elif mode == 'CHECKER':
+        stretch_3d_checker.draw(_stretch_3d_cache, opacity, context, use_tint=False)
+    elif mode == 'BOTH':
+        stretch_3d_checker.draw(_stretch_3d_cache, opacity, context, use_tint=True)
+
+
+def clear_3d():
+    global _stretch_3d_cache
+    _stretch_3d_cache.clear()

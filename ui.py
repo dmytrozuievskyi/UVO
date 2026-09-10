@@ -176,7 +176,7 @@ def draw_header_button(self, context):
 
 
 class VIEW3D_PT_uv_seams_overlay(bpy.types.Panel):
-    bl_label       = "UV Seams"
+    bl_label       = "3D Overlay"
     bl_idname      = "VIEW3D_PT_uv_seams_overlay"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -200,8 +200,55 @@ class VIEW3D_PT_uv_seams_overlay(bpy.types.Panel):
         
         from . import draw_3d
         vp_enabled = draw_3d.is_active_in_space(space)
+        stretch_vp_enabled = draw_3d.is_stretch_active_in_space(space)
         prefs = context.preferences.addons[__package__].preferences
         
+        layout.label(text="Texture Setup")
+
+        obj_props = context.active_object.uv_id_props if context.active_object else None
+
+        if obj_props:
+            tex_row = layout.row(align=True)
+            tex_row.prop(obj_props, "tex_res_x", text="")
+
+            link_icon = 'LINKED' if obj_props.tex_res_linked else 'UNLINKED'
+            tex_row.prop(obj_props, "tex_res_linked", text="", icon=link_icon, toggle=True)
+
+            res_y_sub = tex_row.row(align=True)
+            res_y_sub.enabled = not obj_props.tex_res_linked
+            res_y_sub.prop(obj_props, "tex_res_y", text="")
+
+            td_row = layout.row(align=True)
+            td_row.operator("uv.sample_stretch_texel", text="", icon='EYEDROPPER')
+            td_row.separator()
+            td_row.prop(obj_props, "stretch_target_texel", text="")
+            td_row.prop(obj_props, "stretch_texel_unit", text="")
+        else:
+            layout.label(text="No active object", icon='INFO')
+
+        layout.separator()
+
+        layout.label(text="Stretch")
+
+        row_str = layout.row(align=False)
+        icon_str = 'CHECKBOX_HLT' if stretch_vp_enabled else 'CHECKBOX_DEHLT'
+        row_str.operator(
+            "view3d.toggle_uv_stretch_overlay",
+            text="",
+            icon=icon_str,
+            emboss=False
+        )
+
+        content_str = row_str.row(align=False)
+        content_str.enabled = stretch_vp_enabled and active
+
+        split_fac = 0.5
+        split_str = content_str.split(factor=split_fac, align=False)
+        split_str.prop(props, "stretch_3d_mode", text="")
+        split_str.prop(props, "stretch_3d_opacity", text="", slider=True)
+
+        layout.separator()
+
         layout.label(text="UV Seam")
         
         row_seam = layout.row(align=False)
@@ -220,7 +267,7 @@ class VIEW3D_PT_uv_seams_overlay(bpy.types.Panel):
         split_seam.prop(props, "seams_3d_mode", text="")
         split_seam.prop(prefs, "seams_3d_opacity", text="", slider=True)
         
-        if vp_enabled and active:
+        if (vp_enabled or stretch_vp_enabled) and active:
             has_mod = False
             for obj in context.objects_in_mode:
                 if obj.type == 'MESH':

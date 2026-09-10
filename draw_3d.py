@@ -47,10 +47,11 @@ def _depsgraph_update_handler_3d(scene, depsgraph):
 
 class ViewportState:
     """Per-viewport overlay state."""
-    __slots__ = ('enabled', 'native_seams_saved', 'native_seams_original')
+    __slots__ = ('enabled', 'stretch_enabled', 'native_seams_saved', 'native_seams_original')
     
     def __init__(self):
         self.enabled = False
+        self.stretch_enabled = False
         self.native_seams_saved = False     # whether we've saved the native state
         self.native_seams_original = True   # the user's original show_edge_seams value
 
@@ -73,12 +74,40 @@ def toggle_viewport(context):
     _ensure_3d_boundary_data(context)
     context.area.tag_redraw()
 
+def toggle_stretch_viewport(context):
+    """Toggle the 3D stretch overlay for the current viewport only."""
+    space = context.space_data
+    if space is None or space.type != 'VIEW_3D':
+        return
+    
+    ptr = space.as_pointer()
+    state = _viewport_states.setdefault(ptr, ViewportState())
+    state.stretch_enabled = not state.stretch_enabled
+    
+    context.area.tag_redraw()
+    
+    # Ensure update is triggered
+    from . import draw
+    if state.stretch_enabled:
+        draw.update_batches_safe(context)
+
 def is_active_in_space(space):
-    """Check if the overlay is enabled in the given SpaceView3D."""
+    """Check if the seam overlay is enabled in the given SpaceView3D."""
     if space is None or space.type != 'VIEW_3D':
         return False
     state = _viewport_states.get(space.as_pointer())
     return state is not None and state.enabled
+
+def is_stretch_active_in_space(space):
+    """Check if the stretch overlay is enabled in the given SpaceView3D."""
+    if space is None or space.type != 'VIEW_3D':
+        return False
+    state = _viewport_states.get(space.as_pointer())
+    return state is not None and state.stretch_enabled
+
+def any_viewport_stretch_active():
+    """True if ANY 3D viewport has the stretch overlay enabled."""
+    return any(s.stretch_enabled for s in _viewport_states.values())
 
 def _apply_native_seam_mode(space, state, context):
     """Apply OVERLAY or OVERRIDE mode to native seams for this viewport."""
@@ -291,8 +320,11 @@ def draw_callback_3d():
     context = bpy.context
     space = context.space_data
     
+    seam_active = is_active_in_space(space)
+    stretch_active = is_stretch_active_in_space(space)
+    
     # Per-viewport activation check
-    if not is_active_in_space(space):
+    if not seam_active and not stretch_active:
         return
     
     # Must be in Edit Mode
@@ -302,16 +334,28 @@ def draw_callback_3d():
     if not hasattr(space, 'overlay') or not space.overlay.show_overlays:
         return
         
-    if context.scene.uv_3d_seam_props.is_muted:
+    props_3d = context.scene.uv_3d_seam_props
+    if props_3d.is_muted:
         return
     
     # Periodic stale viewport cleanup (cheap, small dict)
     _cleanup_stale_viewports()
     
-    # do not call _ensure_3d_boundary_data()
-    # BMesh access inside a GPU draw callback is unsafe when modal operators are active in another viewport.
-    # Boundary data is extracted in depsgraph_update_handler instead
-    
+    try:
+        if stretch_active:
+            gpu.state.depth_test_set('LESS_EQUAL')
+            gpu.state.blend_set('ALPHA')
+            gpu.state.face_culling_set('NONE')
+            from . import stretch
+            stretch.draw_3d(props_3d, context)
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+    if not seam_active:
+        return
+
     # Get preferences
     prefs = context.preferences.addons[__package__].preferences
     color = (*prefs.seams_3d_color, prefs.seams_3d_opacity)

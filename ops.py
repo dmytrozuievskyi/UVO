@@ -236,6 +236,22 @@ class VIEW3D_OT_toggle_uv_seams_overlay(bpy.types.Operator):
         draw_3d.toggle_viewport(context)
         return {'FINISHED'}
 
+class VIEW3D_OT_toggle_uv_stretch_overlay(bpy.types.Operator):
+    bl_idname = "view3d.toggle_uv_stretch_overlay"
+    bl_label = "Toggle UV Stretch Overlay"
+    bl_description = "Toggle stretch visualization in this viewport"
+    
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'EDIT_MESH' 
+                and context.space_data is not None 
+                and context.space_data.type == 'VIEW_3D')
+    
+    def execute(self, context):
+        from . import draw_3d
+        draw_3d.toggle_stretch_viewport(context)
+        return {'FINISHED'}
+
 
 class VIEW3D_OT_toggle_uvo_3d_mute(bpy.types.Operator):
     """Toggle the global mute state for UVO 3D Overlays"""
@@ -341,6 +357,7 @@ def register():
     bpy.utils.register_class(UV_OT_RefreshOverlay)
     bpy.utils.register_class(UV_OT_SampleStretchTexel)
     bpy.utils.register_class(VIEW3D_OT_toggle_uv_seams_overlay)
+    bpy.utils.register_class(VIEW3D_OT_toggle_uv_stretch_overlay)
     bpy.utils.register_class(VIEW3D_OT_toggle_uvo_3d_mute)
     bpy.utils.register_class(VIEW3D_OT_select_uv_seams)
     bpy.types.VIEW3D_MT_edit_mesh_select_similar.append(draw_select_similar_uv_seams)
@@ -351,6 +368,7 @@ def unregister():
     bpy.utils.unregister_class(VIEW3D_OT_select_uv_seams)
     bpy.utils.unregister_class(VIEW3D_OT_toggle_uvo_3d_mute)
     bpy.utils.unregister_class(VIEW3D_OT_toggle_uv_seams_overlay)
+    bpy.utils.unregister_class(VIEW3D_OT_toggle_uv_stretch_overlay)
     bpy.utils.unregister_class(UV_OT_SampleStretchTexel)
     bpy.utils.unregister_class(UV_OT_RefreshOverlay)
     bpy.utils.unregister_class(UV_OT_ToggleOverlay)
