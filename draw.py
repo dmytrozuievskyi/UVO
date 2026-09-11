@@ -177,12 +177,6 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
     current_geo_hash = None
     try:
         bm_copy.faces.ensure_lookup_table()
-        ngons = [f for f in bm_copy.faces if len(f.verts) > 4]
-        if ngons:
-            bmesh.ops.triangulate(bm_copy, faces=ngons)
-        
-        bm_copy.faces.ensure_lookup_table()
-        bm_copy.faces.index_update()
         bm_copy.edges.ensure_lookup_table()
         bm_copy.edges.index_update()
         bm_copy.verts.ensure_lookup_table()
@@ -245,23 +239,30 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                 else:
                     topo_groups = _mesh_connected_groups(bm_copy)
     
+                face_to_color = {}
                 for gi, group in enumerate(topo_groups):
                     global_idx = group_offset + gi
                     col = utils.get_distinct_color(
                         global_idx, total_global_groups, seed_offset=0.0, alpha=uv_id_alpha
                     )
                     for fidx in group:
-                        face = bm_copy.faces[fidx]
-                        loops = face.loops
-                        if len(loops) < 3:
-                            continue
-                        uv0 = loops[0][uv_layer].uv
-                        p0  = (uv0.x, uv0.y, 0.0)
-                        for i in range(1, len(loops) - 1):
-                            uv1 = loops[i][uv_layer].uv
-                            uv2 = loops[i + 1][uv_layer].uv
-                            coords.extend((p0, (uv1.x, uv1.y, 0.0), (uv2.x, uv2.y, 0.0)))
-                            colors.extend((col, col, col))
+                        face_to_color[fidx] = col
+                
+                for isle in islands:
+                    if not isle.tris:
+                        continue
+                    col = None
+                    for fidx in getattr(isle, 'face_indices', []):
+                        col = face_to_color.get(fidx)
+                        if col:
+                            break
+                    if not col:
+                        continue
+                    
+                    for tri in isle.tris:
+                        for v in tri:
+                            coords.append((v[0], v[1], 0.0))
+                            colors.append(col)
 
         _t_groups = time.perf_counter()
         utils.log("timing_build", f"groups_and_coords: {(_t_groups - _t_extract)*1000:.1f}ms")
@@ -1123,7 +1124,6 @@ def depsgraph_update_handler(scene, depsgraph):
     geometry_changed = any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh) for u in depsgraph.updates)
 
     if geometry_changed and stretch_3d_active:
-        from . import stretch
         stretch.fast_update_3d_positions(bpy.context)
 
     if not force_rebuild and not geometry_changed:
