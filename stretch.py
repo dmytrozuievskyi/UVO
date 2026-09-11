@@ -215,65 +215,76 @@ def rebuild_from_worker_data(results, obj_cache, context):
     from . import stretch_checker
     from . import stretch_heatmap
 
-    global _geo_batch, _heatmap_batch, _stretch_3d_cache
+    global _geo_batch, _heatmap_batch
 
     all_coords  = []
     all_warped  = []
     all_checker = []
     all_heatmap = []
 
+    for data in results.values():
+        all_coords.extend(data['coords'])
+        all_warped.extend(data['warped_uvs'])
+        all_checker.extend(data['checker_colors'])
+        all_heatmap.extend(data['heatmap_colors'])
+
+    _geo_batch     = stretch_checker.build_batch_from_precomputed(all_coords, all_warped, all_checker)
+    _heatmap_batch = stretch_heatmap.build_batch_from_precomputed(all_coords, all_heatmap)
+
+    _rebuild_3d_cache(results, obj_cache)
+
+def _rebuild_3d_cache(results, obj_cache):
+    """Build per-object 3D overlay data, filtering hidden faces."""
+    global _stretch_3d_cache
+
     for name in list(_stretch_3d_cache.keys()):
         if name not in obj_cache:
             del _stretch_3d_cache[name]
 
     for obj_name, data in results.items():
-        if obj_name in obj_cache:
-            cache = obj_cache[obj_name]
-            world_coords = []
-            uv_coords = []
-            vert_indices = []
-            heatmap_colors = []
-            checker_colors = []
-            
-            tri_offset = 0
-            if cache.get('islands'):
-                for isle in cache['islands']:
-                    hide_flags = getattr(isle, 'hide_flags', None)
-                    for i in range(len(isle.tris)):
-                        idx_start = (tri_offset + i) * 3
-                        idx_end   = idx_start + 3
-                        
-                        if hide_flags and hide_flags[i]:
-                            continue
-                            
-                        if hasattr(isle, 'world_tris') and isle.world_tris:
-                            world_coords.extend(isle.world_tris[i])
-                        if hasattr(isle, 'vert_indices') and isle.vert_indices:
-                            vert_indices.extend(isle.vert_indices[i])
-                        uv_coords.extend(isle.tris[i])
-                        
-                        heatmap_colors.extend(data['heatmap_colors'][idx_start:idx_end])
-                        checker_colors.extend(data['checker_colors'][idx_start:idx_end])
-                        
-                        all_coords.extend(data['coords'][idx_start:idx_end])
-                        all_warped.extend(data['warped_uvs'][idx_start:idx_end])
-                        all_checker.extend(data['checker_colors'][idx_start:idx_end])
-                        all_heatmap.extend(data['heatmap_colors'][idx_start:idx_end])
-                        
-                    tri_offset += len(isle.tris)
-            
-            _stretch_3d_cache[obj_name] = {
-                'world_coords': world_coords,
-                'uv_coords': uv_coords,
-                'vert_indices': vert_indices,
-                'heatmap_colors': heatmap_colors,
-                'checker_colors': checker_colors,
-                'batch': None,
-                'batch_checker': None
-            }
+        if obj_name not in obj_cache:
+            continue
+        cache = obj_cache[obj_name]
+        islands = cache.get('islands')
+        if not islands:
+            continue
 
-    _geo_batch     = stretch_checker.build_batch_from_precomputed(all_coords, all_warped, all_checker)
-    _heatmap_batch = stretch_heatmap.build_batch_from_precomputed(all_coords, all_heatmap)
+        world_coords = []
+        uv_coords = []
+        vert_indices = []
+        heatmap_colors = []
+        checker_colors = []
+        
+        tri_offset = 0
+        for isle in islands:
+            hide_flags = getattr(isle, 'hide_flags', None)
+            for i in range(len(isle.tris)):
+                idx_start = (tri_offset + i) * 3
+                idx_end   = idx_start + 3
+                
+                if hide_flags and hide_flags[i]:
+                    continue
+                    
+                if hasattr(isle, 'world_tris') and isle.world_tris:
+                    world_coords.extend(isle.world_tris[i])
+                if hasattr(isle, 'vert_indices') and isle.vert_indices:
+                    vert_indices.extend(isle.vert_indices[i])
+                uv_coords.extend(isle.tris[i])
+                
+                heatmap_colors.extend(data['heatmap_colors'][idx_start:idx_end])
+                checker_colors.extend(data['checker_colors'][idx_start:idx_end])
+                
+            tri_offset += len(isle.tris)
+        
+        _stretch_3d_cache[obj_name] = {
+            'world_coords': world_coords,
+            'uv_coords': uv_coords,
+            'vert_indices': vert_indices,
+            'heatmap_colors': heatmap_colors,
+            'checker_colors': checker_colors,
+            'batch': None,
+            'batch_checker': None
+        }
 
 def fast_update_3d_positions(context):
     """Instantly updates the 3D overlay vertices during drag by reading eval_mesh."""
@@ -304,7 +315,16 @@ def fast_update_3d_positions(context):
             # indices is (N, 3). We want a flat list of (3,) arrays for batch_for_shader
             flat_indices = indices.ravel()
             new_coords = verts[flat_indices]
-            cache['world_coords'] = new_coords.tolist()
+            
+            # Transform local coords to world space
+            mat = np.array(eval_obj.matrix_world, dtype=np.float32)
+            # new_coords is (M, 3). Extend to (M, 4) for matrix multiplication
+            ones = np.ones((new_coords.shape[0], 1), dtype=np.float32)
+            new_coords_4d = np.hstack([new_coords, ones])
+            # Multiply (M, 4) x (4, 4)^T -> (M, 4)
+            world_coords_4d = np.dot(new_coords_4d, mat.T)
+            # Take x, y, z
+            cache['world_coords'] = world_coords_4d[:, :3].tolist()
             
             # Invalidate batches to force redraw with new coords
             cache['batch'] = None
