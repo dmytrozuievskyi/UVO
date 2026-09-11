@@ -194,6 +194,164 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
     return islands
 
 
+def _emit_triangle(l0, l1, l2, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j):
+    uv0 = l0[uv_layer].uv
+    uv1 = l1[uv_layer].uv
+    uv2 = l2[uv_layer].uv
+    if has_matrix:
+        p0 = matrix_world @ l0.vert.co
+        p1 = matrix_world @ l1.vert.co
+        p2 = matrix_world @ l2.vert.co
+    else:
+        p0 = l0.vert.co
+        p1 = l1.vert.co
+        p2 = l2.vert.co
+
+    tris.append(((uv0.x, uv0.y), (uv1.x, uv1.y), (uv2.x, uv2.y)))
+    world_tris.append(((p0.x, p0.y, p0.z), 
+                       (p1.x, p1.y, p1.z), 
+                       (p2.x, p2.y, p2.z)))
+    vert_indices.append((l0.vert.index, l1.vert.index, l2.vert.index))
+    hide_flags.append(is_hidden)
+
+    eu = uv1 - uv0
+    ev = uv2 - uv0
+    det_uv = eu.x * ev.y - eu.y * ev.x
+    uv_area = abs(det_uv) * 0.5
+
+    dp1 = p1 - p0
+    dp2 = p2 - p0
+    surf_area = dp1.cross(dp2).length * 0.5
+
+    if abs(det_uv) < 1e-12:
+        jacobians.append(identity_j)
+        return uv_area, surf_area
+
+    inv_det = 1.0 / det_uv
+    Tu = (dp1 * ev.y - dp2 * eu.y) * inv_det
+    Tv = (dp2 * eu.x - dp1 * ev.x) * inv_det
+
+    E = Tu.dot(Tu)
+    F = Tu.dot(Tv)
+    G = Tv.dot(Tv)
+
+    D = E * G - F * F
+    if D < 1e-12:
+        jacobians.append(identity_j)
+        return uv_area, surf_area
+
+    s = math.sqrt(D)
+    t_sq = E + G + 2 * s
+    if t_sq < 1e-12:
+        jacobians.append(identity_j)
+        return uv_area, surf_area
+
+    t = math.sqrt(t_sq)
+    M00 = (E + s) / t
+    M01 = F / t
+    M10 = F / t
+    M11 = (G + s) / t
+    jacobians.append((M00, M01, M10, M11))
+    return uv_area, surf_area
+
+def _point_in_triangle_uv(p, a, b, c):
+    v0 = b - a
+    v1 = c - a
+    v2 = p - a
+
+    d00 = v0.dot(v0)
+    d01 = v0.dot(v1)
+    d11 = v1.dot(v1)
+    d20 = v2.dot(v0)
+    d21 = v2.dot(v1)
+
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-12:
+        return False
+
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+
+    return (u >= -1e-5) and (v >= -1e-5) and (w >= -1e-5)
+
+def _earclip_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j):
+    n = len(loops)
+    verts = [(loops[i], loops[i][uv_layer].uv) for i in range(n)]
+    indices = list(range(n))
+
+    signed_area = sum(
+        verts[i][1].x * verts[(i+1)%n][1].y - verts[(i+1)%n][1].x * verts[i][1].y
+        for i in range(n)
+    )
+    ccw = signed_area > 0
+    total_uv = 0.0
+    total_surf = 0.0
+
+    while len(indices) > 2:
+        ear_found = False
+        for offset in range(len(indices)):
+            i = (offset + 1) % len(indices)
+            prev_i = (i - 1) % len(indices)
+            next_i = (i + 1) % len(indices)
+
+            idx_prev = indices[prev_i]
+            idx_curr = indices[i]
+            idx_next = indices[next_i]
+
+            a = verts[idx_prev][1]
+            b = verts[idx_curr][1]
+            c = verts[idx_next][1]
+
+            cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+            if (ccw and cross <= 0) or (not ccw and cross >= 0):
+                continue
+
+            is_ear = True
+            for j in range(len(indices)):
+                if j in (prev_i, i, next_i):
+                    continue
+                p = verts[indices[j]][1]
+                if _point_in_triangle_uv(p, a, b, c):
+                    is_ear = False
+                    break
+
+            if is_ear:
+                uv_a, surf_a = _emit_triangle(verts[idx_prev][0], verts[idx_curr][0], verts[idx_next][0], 
+                                                    uv_layer, matrix_world, has_matrix, is_hidden, 
+                                                    tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+                total_uv += uv_a
+                total_surf += surf_a
+                indices.pop(i)
+                ear_found = True
+                break
+
+        if not ear_found:
+            l0 = verts[indices[0]][0]
+            for i in range(1, len(indices) - 1):
+                l1 = verts[indices[i]][0]
+                l2 = verts[indices[i + 1]][0]
+                uv_a, surf_a = _emit_triangle(l0, l1, l2, uv_layer, matrix_world, has_matrix, is_hidden, 
+                                              tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+                total_uv += uv_a
+                total_surf += surf_a
+            break
+            
+    return total_uv, total_surf
+
+def _fan_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j):
+    l0 = loops[0]
+    total_uv = 0.0
+    total_surf = 0.0
+    for i in range(1, len(loops) - 1):
+        l1 = loops[i]
+        l2 = loops[i + 1]
+        uv_a, surf_a = _emit_triangle(l0, l1, l2, uv_layer, matrix_world, has_matrix, is_hidden, 
+                                      tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+        total_uv += uv_a
+        total_surf += surf_a
+    return total_uv, total_surf
+
 def _fan_tris_and_data(faces, uv_layer, matrix_world):
     tris = []
     world_tris = []
@@ -208,81 +366,21 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
 
     for face in faces:
         loops = face.loops
-        if len(loops) < 3:
+        n = len(loops)
+        if n < 3:
             continue
         
         is_hidden = getattr(face, 'hide', False)
         
-        l0 = loops[0]
-        uv0 = l0[uv_layer].uv
-        if has_matrix:
-            p0 = matrix_world @ l0.vert.co
+        if n <= 3:
+            uv_a, surf_a = _fan_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, 
+                                          tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
         else:
-            p0 = l0.vert.co
-
-        for i in range(1, len(loops) - 1):
-            l1 = loops[i]
-            l2 = loops[i + 1]
-            uv1 = l1[uv_layer].uv
-            uv2 = l2[uv_layer].uv
-            if has_matrix:
-                p1 = matrix_world @ l1.vert.co
-                p2 = matrix_world @ l2.vert.co
-            else:
-                p1 = l1.vert.co
-                p2 = l2.vert.co
-
-
-            tris.append(((uv0.x, uv0.y), (uv1.x, uv1.y), (uv2.x, uv2.y)))
-            world_tris.append(((l0.vert.co.x, l0.vert.co.y, l0.vert.co.z), 
-                               (l1.vert.co.x, l1.vert.co.y, l1.vert.co.z), 
-                               (l2.vert.co.x, l2.vert.co.y, l2.vert.co.z)))
-            vert_indices.append((l0.vert.index, l1.vert.index, l2.vert.index))
-            hide_flags.append(is_hidden)
-
-
-            eu = uv1 - uv0
-            ev = uv2 - uv0
-            det_uv = eu.x * ev.y - eu.y * ev.x
-            uv_area = abs(det_uv) * 0.5
-            total_uv_area += uv_area
-
-
-            dp1 = p1 - p0
-            dp2 = p2 - p0
-            surf_area = dp1.cross(dp2).length * 0.5
-            total_surf_area += surf_area
-
-
-            if abs(det_uv) < 1e-12:
-                jacobians.append(identity_j)
-                continue
-
-            inv_det = 1.0 / det_uv
-            Tu = (dp1 * ev.y - dp2 * eu.y) * inv_det
-            Tv = (dp2 * eu.x - dp1 * ev.x) * inv_det
-
-            E = Tu.dot(Tu)
-            F = Tu.dot(Tv)
-            G = Tv.dot(Tv)
-
-            D = E * G - F * F
-            if D < 1e-12:
-                jacobians.append(identity_j)
-                continue
-
-            s = math.sqrt(D)
-            t_sq = E + G + 2 * s
-            if t_sq < 1e-12:
-                jacobians.append(identity_j)
-                continue
-
-            t = math.sqrt(t_sq)
-            M00 = (E + s) / t
-            M01 = F / t
-            M10 = F / t
-            M11 = (G + s) / t
-            jacobians.append((M00, M01, M10, M11))
+            uv_a, surf_a = _earclip_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, 
+                                              tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+        
+        total_uv_area += uv_a
+        total_surf_area += surf_a
 
     return tris, world_tris, vert_indices, hide_flags, jacobians, total_uv_area, total_surf_area
 
