@@ -9,9 +9,19 @@ void main()
 {
     v_uv = realUV;
     v_heatColor = heatColor;
-    vec4 clip_pos = ModelViewProjectionMatrix * vec4(pos, 1.0);
-    clip_pos.z -= 0.0005 * clip_pos.w; // depth bias to prevent z-fighting
-    gl_Position = clip_pos;
+    vec4 view_pos = ModelViewMatrix * vec4(pos, 1.0);
+    if (abs(ProjectionMatrix[3][3]) < 0.001) {
+        // Perspective
+        float dist = length(view_pos.xyz);
+        float bias = (dist * 0.0005 + 0.0001);
+        vec3 view_dir = view_pos.xyz / dist;
+        view_pos.xyz -= view_dir * bias;
+        gl_Position = ProjectionMatrix * view_pos;
+    } else {
+        // Orthographic
+        gl_Position = ProjectionMatrix * view_pos;
+        gl_Position.z += 0.001 * ProjectionMatrix[2][2];
+    }
 }
 """
 
@@ -41,7 +51,8 @@ def get_shader():
     global _shader
     if _shader is None:
         info = gpu.types.GPUShaderCreateInfo()
-        info.push_constant('MAT4',  "ModelViewProjectionMatrix")
+        info.push_constant('MAT4',  "ModelViewMatrix")
+        info.push_constant('MAT4',  "ProjectionMatrix")
         info.push_constant('FLOAT', "opacity")
         info.push_constant('FLOAT', "divisions")
         info.push_constant('FLOAT', "use_tint")
@@ -79,7 +90,8 @@ def draw(stretch_3d_cache, opacity, context, use_tint=False):
         
     shader.uniform_float("divisions", divisions)
 
-    base_mvp = gpu.matrix.get_projection_matrix() @ gpu.matrix.get_model_view_matrix()
+    base_mv = gpu.matrix.get_model_view_matrix()
+    base_proj = gpu.matrix.get_projection_matrix()
 
     for obj_name, cache in stretch_3d_cache.items():
         batch_key = 'batch_checker'
@@ -97,6 +109,6 @@ def draw(stretch_3d_cache, opacity, context, use_tint=False):
             
         obj = context.scene.objects.get(obj_name)
         if obj:
-            mvp = base_mvp @ obj.matrix_world
-            shader.uniform_float("ModelViewProjectionMatrix", mvp)
+            shader.uniform_float("ModelViewMatrix", base_mv)
+            shader.uniform_float("ProjectionMatrix", base_proj)
             cache[batch_key].draw(shader)

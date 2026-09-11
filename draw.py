@@ -113,20 +113,20 @@ def _get_shader():
 
 
 def _uv_hash(bm, uv_layer):
-    # Order-sensitive rolling hash.
     _pack = struct.pack
     h = 0
     for face in bm.faces:
+        if face.hide: continue
         for loop in face.loops:
             uv = loop[uv_layer].uv
             h = (h * 1000003 ^ hash(_pack('2f', uv.x, uv.y))) & 0xFFFFFFFFFFFFFFFF
     return h
 
 def _geo_hash(bm):
-    # Order-sensitive rolling hash.
     _pack = struct.pack
     h = 0
     for face in bm.faces:
+        if face.hide: continue
         for loop in face.loops:
             co = loop.vert.co
             h = (h * 1000003 ^ hash(_pack('3f', co.x, co.y, co.z))) & 0xFFFFFFFFFFFFFFFF
@@ -508,7 +508,7 @@ def _tag_redraw():
     try:
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
-                if area.type == 'IMAGE_EDITOR':
+                if area.type in {'IMAGE_EDITOR', 'VIEW_3D'}:
                     area.tag_redraw()
     except Exception:
         pass
@@ -1017,6 +1017,8 @@ def update_batches_safe(context):
                     if name in pk:
                         del _isect_cross_cache[pk]
                 any_changed = True
+                
+        stretch.clear_stale(active_names)
 
 
         props_3d = context.scene.uv_3d_seam_props
@@ -1048,8 +1050,12 @@ def update_batches_safe(context):
         if not (props.show_intersect and not props.is_muted):
             _intersect_batches['hatch']   = None
             _intersect_batches['checker'] = None
+            
         if not (props.show_stretch and not props.is_muted):
-            stretch.clear()
+            # Only clear 2D batches if 2D is off
+            stretch._geo_batch = None
+            stretch._heatmap_batch = None
+            
         if not stretch_3d_active:
             stretch.clear_3d()
 
@@ -1115,6 +1121,10 @@ def depsgraph_update_handler(scene, depsgraph):
                 break
                 
     geometry_changed = any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh) for u in depsgraph.updates)
+
+    if geometry_changed and stretch_3d_active:
+        from . import stretch
+        stretch.fast_update_3d_positions(bpy.context)
 
     if not force_rebuild and not geometry_changed:
         return

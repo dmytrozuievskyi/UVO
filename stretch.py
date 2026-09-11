@@ -205,6 +205,12 @@ def rebuild(props, obj_cache, context):
     clear_3d()
 
 
+def clear_stale(active_names):
+    global _stretch_3d_cache
+    for name in list(_stretch_3d_cache.keys()):
+        if name not in active_names:
+            del _stretch_3d_cache[name]
+
 def rebuild_from_worker_data(results, obj_cache, context):
     from . import stretch_checker
     from . import stretch_heatmap
@@ -216,36 +222,95 @@ def rebuild_from_worker_data(results, obj_cache, context):
     all_checker = []
     all_heatmap = []
 
+    for name in list(_stretch_3d_cache.keys()):
+        if name not in obj_cache:
+            del _stretch_3d_cache[name]
+
     for obj_name, data in results.items():
-        all_coords.extend(data['coords'])
-        all_warped.extend(data['warped_uvs'])
-        all_checker.extend(data['checker_colors'])
-        all_heatmap.extend(data['heatmap_colors'])
-        
         if obj_name in obj_cache:
             cache = obj_cache[obj_name]
             world_coords = []
             uv_coords = []
+            vert_indices = []
+            heatmap_colors = []
+            checker_colors = []
+            
+            tri_offset = 0
             if cache.get('islands'):
                 for isle in cache['islands']:
-                    if hasattr(isle, 'world_tris') and isle.world_tris:
-                        for tri in isle.world_tris:
-                            world_coords.extend(tri)
-                    for tri in isle.tris:
-                        uv_coords.extend(tri)
+                    hide_flags = getattr(isle, 'hide_flags', None)
+                    for i in range(len(isle.tris)):
+                        idx_start = (tri_offset + i) * 3
+                        idx_end   = idx_start + 3
+                        
+                        if hide_flags and hide_flags[i]:
+                            continue
+                            
+                        if hasattr(isle, 'world_tris') and isle.world_tris:
+                            world_coords.extend(isle.world_tris[i])
+                        if hasattr(isle, 'vert_indices') and isle.vert_indices:
+                            vert_indices.extend(isle.vert_indices[i])
+                        uv_coords.extend(isle.tris[i])
+                        
+                        heatmap_colors.extend(data['heatmap_colors'][idx_start:idx_end])
+                        checker_colors.extend(data['checker_colors'][idx_start:idx_end])
+                        
+                        all_coords.extend(data['coords'][idx_start:idx_end])
+                        all_warped.extend(data['warped_uvs'][idx_start:idx_end])
+                        all_checker.extend(data['checker_colors'][idx_start:idx_end])
+                        all_heatmap.extend(data['heatmap_colors'][idx_start:idx_end])
+                        
+                    tri_offset += len(isle.tris)
             
             _stretch_3d_cache[obj_name] = {
                 'world_coords': world_coords,
                 'uv_coords': uv_coords,
-                'heatmap_colors': data['heatmap_colors'],
-                'checker_colors': data['checker_colors'],
+                'vert_indices': vert_indices,
+                'heatmap_colors': heatmap_colors,
+                'checker_colors': checker_colors,
                 'batch': None,
                 'batch_checker': None
             }
-            print(f"[UVO] stretch.rebuild: Populated 3D cache for {obj_name} ({len(world_coords)} verts)")
 
     _geo_batch     = stretch_checker.build_batch_from_precomputed(all_coords, all_warped, all_checker)
     _heatmap_batch = stretch_heatmap.build_batch_from_precomputed(all_coords, all_heatmap)
+
+def fast_update_3d_positions(context):
+    """Instantly updates the 3D overlay vertices during drag by reading eval_mesh."""
+    import bpy
+    import numpy as np
+    
+    if not _stretch_3d_cache: return
+    
+    depsgraph = context.evaluated_depsgraph_get()
+    for obj_name, cache in _stretch_3d_cache.items():
+        if not cache.get('vert_indices') or not cache.get('world_coords'): continue
+        
+        obj = bpy.data.objects.get(obj_name)
+        if not obj: continue
+        
+        eval_obj = obj.evaluated_get(depsgraph)
+        mesh = eval_obj.data
+        if not mesh.vertices: continue
+        
+        try:
+            verts = np.empty((len(mesh.vertices), 3), dtype=np.float32)
+            mesh.vertices.foreach_get('co', verts.ravel())
+            
+            # Update world_coords instantly using numpy advanced indexing
+            indices = np.array(cache['vert_indices'], dtype=np.int32)
+            if np.max(indices) >= len(verts): continue # topology changed wildly
+            
+            # indices is (N, 3). We want a flat list of (3,) arrays for batch_for_shader
+            flat_indices = indices.ravel()
+            new_coords = verts[flat_indices]
+            cache['world_coords'] = new_coords.tolist()
+            
+            # Invalidate batches to force redraw with new coords
+            cache['batch'] = None
+            cache['batch_checker'] = None
+        except Exception as e:
+            pass
 
 def draw(props, shader, context):
     """Draw stretch overlay layers."""

@@ -8,9 +8,19 @@ _VERT_SRC = """
 void main()
 {
     fcolor = color;
-    vec4 clip_pos = ModelViewProjectionMatrix * vec4(pos, 1.0);
-    clip_pos.z -= 0.0005 * clip_pos.w; // depth bias to prevent z-fighting
-    gl_Position = clip_pos;
+    vec4 view_pos = ModelViewMatrix * vec4(pos, 1.0);
+    if (abs(ProjectionMatrix[3][3]) < 0.001) {
+        // Perspective
+        float dist = length(view_pos.xyz);
+        float bias = (dist * 0.0005 + 0.0001);
+        vec3 view_dir = view_pos.xyz / dist;
+        view_pos.xyz -= view_dir * bias;
+        gl_Position = ProjectionMatrix * view_pos;
+    } else {
+        // Orthographic
+        gl_Position = ProjectionMatrix * view_pos;
+        gl_Position.z += 0.001 * ProjectionMatrix[2][2];
+    }
 }
 """
 
@@ -25,7 +35,8 @@ def get_shader():
     global _shader
     if _shader is None:
         info = gpu.types.GPUShaderCreateInfo()
-        info.push_constant('MAT4',  "ModelViewProjectionMatrix")
+        info.push_constant('MAT4',  "ModelViewMatrix")
+        info.push_constant('MAT4',  "ProjectionMatrix")
         info.push_constant('FLOAT', "opacity")
         info.vertex_in(0, 'VEC3', "pos")
         info.vertex_in(1, 'VEC4', "color")
@@ -45,7 +56,8 @@ def draw(stretch_3d_cache, opacity):
     shader.bind()
     shader.uniform_float("opacity", opacity)
 
-    base_mvp = gpu.matrix.get_projection_matrix() @ gpu.matrix.get_model_view_matrix()
+    base_mv = gpu.matrix.get_model_view_matrix()
+    base_proj = gpu.matrix.get_projection_matrix()
 
     for obj_name, cache in stretch_3d_cache.items():
         if cache.get('batch') is None:
@@ -58,6 +70,6 @@ def draw(stretch_3d_cache, opacity):
         
         obj = bpy.data.objects.get(obj_name)
         if obj:
-            mvp = base_mvp @ obj.matrix_world
-            shader.uniform_float("ModelViewProjectionMatrix", mvp)
+            shader.uniform_float("ModelViewMatrix", base_mv)
+            shader.uniform_float("ProjectionMatrix", base_proj)
             cache['batch'].draw(shader)
