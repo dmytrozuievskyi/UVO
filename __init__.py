@@ -182,8 +182,15 @@ def start_worker():
     _ipc_synced = False
     _pending_job = None
 
-    # Launch Blender in background mode and run registered CLI command.
-    cmd = [bpy.app.binary_path, '--background', '--command', 'uvo_worker']
+    import os
+    addon_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(addon_dir).replace('\\', '/')
+    pkg = __package__
+    
+    expr = f"import sys; sys.path.insert(0, '{parent_dir}'); from {pkg} import worker; worker.main_loop(sys.argv)"
+    
+    # Launch Blender in background mode without loading other addons or UI
+    cmd = [bpy.app.binary_path, '--background', '--factory-startup', '--python-expr', expr]
 
     if utils._debug_enabled():
         cmd.append('--uvo-debug')
