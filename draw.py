@@ -1153,6 +1153,7 @@ def draw_callback():
                 offscreen.composite(props.intersect_opacity, _inter_threshold)
                 shader.bind()  # restore after offscreen composite
 
+        gpu.state.line_width_set(1.0)
 
         if props.show_padding:
             if padding.batches['ok']:
