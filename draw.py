@@ -631,14 +631,13 @@ def _rebuild_hatch_from_cache(props):
 
     # Tile-crossing detection
     tile_crossing_flat = set()
-    if tiled:
-        for name, cache in _obj_cache.items():
-            islands = cache.get('islands') or []
-            base    = base_indices[name]
-            for li in ix.find_tile_crossing_islands(islands):
-                fi = base + li
-                global_inter.add(fi)
-                tile_crossing_flat.add(fi)
+    for name, cache in _obj_cache.items():
+        islands = cache.get('islands') or []
+        base    = base_indices[name]
+        for li in ix.find_tile_crossing_islands(islands):
+            fi = base + li
+            global_inter.add(fi)
+            tile_crossing_flat.add(fi)
 
 
     hatch_coords, hatch_colors     = [], []
@@ -740,6 +739,11 @@ def _build_offscreen_tris(all_islands_flat, global_inter, global_inter_pairs,
         for fi, isle in enumerate(all_islands_flat):
             if fi not in global_inter:
                 continue
+            if fi in tile_crossing_flat:
+                inter_tris_raw.append(isle.tris)
+                inter_tris_raw.append(isle.tris)
+                n_unique += 1
+                continue 
             key = isle.uv_key
             if key is not None:
                 if key in seen_norm_keys:
@@ -1201,6 +1205,7 @@ def draw_callback():
                 offscreen.composite(props.intersect_opacity, _inter_threshold)
                 shader.bind()  # restore after offscreen composite
 
+        gpu.state.line_width_set(1.0)
 
         if props.show_padding:
             if padding.batches['ok']:
