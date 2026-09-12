@@ -338,6 +338,16 @@ def rebuild(props, obj_cache):
     )
 
     for i, (isle, res_x, res_y) in enumerate(all_islands_data):
+        if i in bad_idx:
+            continue
+        pad_u = pad_px / res_x
+        pad_v = pad_px / res_y
+        mn_u, mn_v, mx_u, mx_v = isle.aabb
+        if (math.floor(mn_u - pad_u + _EPS) != math.floor(mx_u + pad_u - _EPS) or
+            math.floor(mn_v - pad_v + _EPS) != math.floor(mx_v + pad_v - _EPS)):
+            bad_idx.add(i)
+
+    for i, (isle, res_x, res_y) in enumerate(all_islands_data):
         segs = disp_segs[i]
         if i in bad_idx:
             _add(segs, col_bad, bad_coords, bad_colors)
