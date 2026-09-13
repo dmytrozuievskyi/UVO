@@ -123,14 +123,14 @@ def draw(stretch_3d_cache, opacity, context, use_tint=False):
     for obj_name, cache in stretch_3d_cache.items():
         batch_key = 'batch_checker'
         if cache.get(batch_key) is None:
-            if not cache.get('world_coords') or not cache.get('uv_coords') or not cache.get('heatmap_colors'):
+            if not cache.get('world_coords') or not cache.get('uv_coords') or not cache.get('checker_colors'):
                 continue
             cache[batch_key] = batch_for_shader(
                 shader, 'TRIS',
                 {
                     "pos": cache['world_coords'], 
                     "realUV": cache['uv_coords'],
-                    "heatColor": cache['heatmap_colors']
+                    "heatColor": cache['checker_colors']
                 }
             )
             
