@@ -23,7 +23,9 @@ void main()
         view_pos.xyz -= view_dir * bias;
         gl_Position = ProjectionMatrix * view_pos;
     } else {
-        v_dist = 1.0 / abs(ProjectionMatrix[0][0]);
+        // Apply a 1.4 coefficient to approximate the standard FOV tangent.
+        // This makes the orthographic zoom scale closely match the perspective view_distance.
+        v_dist = 1.4 / abs(ProjectionMatrix[1][1]);
         gl_Position = ProjectionMatrix * view_pos;
         gl_Position.z += 0.001 * ProjectionMatrix[2][2];
     }
@@ -100,9 +102,7 @@ def draw(stretch_3d_cache, opacity, context, use_tint=False):
         divisions = float(context.active_object.uv_id_props.tex_res_x) / 100.0
         divisions = max(2.0, divisions)
         
-    # Scale based on user request (5x larger visual size -> 0.4 multiplier since the old shader had a * 2.0 multiplier)
-    # The previous effective baseline was ~20 divisions. 5x larger cells = 4 divisions.
-    base_multiplier = 0.4
+    base_multiplier = 0.2
     
     # Compensate for viewport resolution & UI scale so physical size is stable across monitors
     ui_scale = 1.0
