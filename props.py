@@ -182,7 +182,12 @@ def _do_texel_update():
                 draw._obj_cache[obj.name]['tex_h'] = float(obj.uv_id_props.tex_res_y)
                 draw._obj_cache[obj.name]['target_texel'] = float(obj.uv_id_props.stretch_internal_texel)
                 
-        stretch.rebuild(props, draw._obj_cache, bpy.context)
+        # Send a direct job to the worker to compute with new texel density
+        if draw._dispatch_worker_job(props):
+            draw._start_result_poller()
+        else:
+            stretch.rebuild(props, draw._obj_cache, bpy.context)
+            
         draw._tag_redraw()
     return None
 

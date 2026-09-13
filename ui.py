@@ -249,6 +249,24 @@ class VIEW3D_PT_uv_seams_overlay(bpy.types.Panel):
 
         layout.separator()
 
+        if stretch_vp_enabled:
+            sel = [o for o in context.selected_objects if hasattr(o, 'uv_id_props')]
+            if len(sel) > 1:
+                ref = sel[0].uv_id_props
+                mismatch = False
+                for obj in sel[1:]:
+                    op = obj.uv_id_props
+                    if (op.tex_res_x != ref.tex_res_x
+                            or op.tex_res_y != ref.tex_res_y
+                            or op.stretch_internal_texel != ref.stretch_internal_texel):
+                        mismatch = True
+                        break
+                if mismatch:
+                    warn = layout.row(align=True)
+                    warn.alert = True
+                    warn.label(text="Objects have different texture settings",
+                               icon='ERROR')
+
         layout.label(text="UV Seam")
         
         row_seam = layout.row(align=False)
