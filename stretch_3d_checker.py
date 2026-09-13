@@ -39,7 +39,7 @@ void main()
     float scale = exp2(floor(log2(max(v_dist, 0.001))));
     float current_divisions = divisions / scale;
     
-    vec2 fuv = floor(v_uv * current_divisions);
+    vec2 fuv = floor(v_uv * current_divisions * vec2(1.0, aspect_y));
     float checker = mod(fuv.x + fuv.y, 2.0);
     int cell = (checker > 0.5) ? 1 : 0;
     
@@ -68,6 +68,7 @@ def get_shader():
         info.push_constant('FLOAT', "divisions")
         info.push_constant('FLOAT', "use_tint")
         info.push_constant('FLOAT', "u_view_distance")
+        info.push_constant('FLOAT', "aspect_y")
         
         info.vertex_in(0, 'VEC3', "pos")
         info.vertex_in(1, 'VEC2', "realUV")
@@ -96,12 +97,6 @@ def draw(stretch_3d_cache, opacity, context, use_tint=False):
     
     # We use a fixed scale since the mesh doesn't have a "zoom" factor like 2D views
     # but we could link it to the texture resolution or user target texel.
-    # For now, 10.0 divisions looks decent.
-    divisions = 10.0
-    if context.active_object and hasattr(context.active_object, 'uv_id_props'):
-        divisions = float(context.active_object.uv_id_props.tex_res_x) / 100.0
-        divisions = max(2.0, divisions)
-        
     base_multiplier = 0.2
     
     # Compensate for viewport resolution & UI scale so physical size is stable across monitors
@@ -116,10 +111,6 @@ def draw(stretch_3d_cache, opacity, context, use_tint=False):
     
     # This formula ensures that squares take up proportionally more pixels on higher res or higher UI scale.
     res_factor = (viewport_height / 1080.0) / max(0.1, ui_scale)
-    
-    divisions = divisions * base_multiplier * res_factor
-        
-    shader.uniform_float("divisions", divisions)
     
     u_view_distance = 10.0
     if hasattr(context, 'region_data') and hasattr(context.region_data, 'view_distance'):
@@ -145,6 +136,19 @@ def draw(stretch_3d_cache, opacity, context, use_tint=False):
             
         obj = context.scene.objects.get(obj_name)
         if obj:
+            divisions = 10.0
+            aspect_y = 1.0
+            if hasattr(obj, 'uv_id_props'):
+                res_x = max(1.0, float(obj.uv_id_props.tex_res_x))
+                res_y = max(1.0, float(obj.uv_id_props.tex_res_y))
+                divisions = res_x / 100.0
+                aspect_y = res_y / res_x
+            
+            divisions = max(2.0, divisions)
+            divisions = divisions * base_multiplier * res_factor
+            
+            shader.uniform_float("divisions", divisions)
+            shader.uniform_float("aspect_y", aspect_y)
             shader.uniform_float("ModelViewMatrix", base_mv)
             shader.uniform_float("ProjectionMatrix", base_proj)
             cache[batch_key].draw(shader)
