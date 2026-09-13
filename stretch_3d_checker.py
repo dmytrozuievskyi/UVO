@@ -43,9 +43,9 @@ void main()
     float checker = mod(fuv.x + fuv.y, 2.0);
     int cell = (checker > 0.5) ? 1 : 0;
     
-    vec3 col1 = vec3(0.5);
-    vec3 col2 = vec3(0.3);
-    vec3 col = mix(col2, col1, checker);
+    vec3 colDark  = vec3(0.0453, 0.0453, 0.0453);
+    vec3 colLight = vec3(0.1008, 0.1008, 0.1008);
+    vec3 col = (cell == 1) ? colLight : colDark;
     
     if (use_tint == 1.0) {
         float tint = v_heatColor.a;
