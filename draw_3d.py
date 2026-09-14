@@ -344,14 +344,17 @@ def draw_callback_3d():
     try:
         if stretch_active:
             gpu.state.depth_test_set('LESS_EQUAL')
+            gpu.state.depth_mask_set(False)
             gpu.state.blend_set('ALPHA')
             gpu.state.face_culling_set('NONE')
             from . import stretch
             stretch.draw_3d(props_3d, context)
+            gpu.state.depth_mask_set(True)
             
     except Exception as e:
         import traceback
         traceback.print_exc()
+        gpu.state.depth_mask_set(True)
 
     if not seam_active:
         return
