@@ -91,6 +91,8 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
             raise RuntimeError("No edit mesh objects found")
             
         sync_on = context.scene.tool_settings.use_uv_select_sync
+        area_type = context.area.type if context.area else 'NONE'
+        use_3d_selection = sync_on or (area_type == 'VIEW_3D')
         
         has_any_selection = False
         obj_data = {} # {obj: (bm, uv_layer, sel_faces)}
@@ -101,7 +103,7 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
             bm.faces.ensure_lookup_table()
             uv_layer = bm.loops.layers.uv.verify()
             
-            if sync_on:
+            if use_3d_selection:
                 sel_faces = [f for f in bm.faces if f.select]
             else:
                 sel_faces = []
