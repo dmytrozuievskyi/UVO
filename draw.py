@@ -5,6 +5,7 @@ import math
 import struct
 import time
 import traceback
+import numpy as np
 from gpu_extras.batch import batch_for_shader
 from bpy.app.handlers import persistent
 from . import utils
@@ -47,7 +48,8 @@ _PREPASS_FAILED = object()  # sentinel: pre-pass failed, use n=1 fallback
 
 _DEBOUNCE_DELAY = 0.25
 _debounce_fn    = None
-_pending_dispatch = False
+_pending_dispatch_count = 0
+_job_hashes_sent = {}
 
 
 def _schedule_debounce():
@@ -122,14 +124,18 @@ def _uv_hash(bm, uv_layer):
             h = (h * 1000003 ^ hash(_pack('2f', uv.x, uv.y))) & 0xFFFFFFFFFFFFFFFF
     return h
 
-def _geo_hash(bm):
+def _geo_hash(bm, eval_verts=None):
     _pack = struct.pack
     h = 0
     for face in bm.faces:
         if face.hide: continue
         for loop in face.loops:
-            co = loop.vert.co
-            h = (h * 1000003 ^ hash(_pack('3f', co.x, co.y, co.z))) & 0xFFFFFFFFFFFFFFFF
+            v_idx = loop.vert.index
+            if eval_verts is not None and v_idx < len(eval_verts):
+                x, y, z = eval_verts[v_idx]
+            else:
+                x, y, z = loop.vert.co.x, loop.vert.co.y, loop.vert.co.z
+            h = (h * 1000003 ^ hash(_pack('3d', float(x), float(y), float(z)))) & 0xFFFFFFFFFFFFFFFF
     return h
 
 
@@ -159,7 +165,8 @@ def _mesh_connected_groups(bm):
 def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
                     obj_index=0, total_objs=1,
                     group_offset=0, total_global_groups=1,
-                    precomputed_groups=None):
+                    precomputed_groups=None,
+                    eval_verts=None):
     _t_start = time.perf_counter()
     if obj.mode != 'EDIT':
         return None, None, None, None, None, None
@@ -186,7 +193,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 
         uv_layer     = bm_copy.loops.layers.uv.verify()
         current_uv_hash = _uv_hash(bm_copy, uv_layer)
-        current_geo_hash = _geo_hash(bm_copy)
+        current_geo_hash = _geo_hash(bm_copy, eval_verts)
         
         _t_hash = time.perf_counter()
         utils.log("timing_build", f"_hashes: {(_t_hash - _t_copy)*1000:.1f}ms")
@@ -194,13 +201,21 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
         cached = _obj_cache.get(obj.name)
         uv_same = cached and cached.get('hash') == current_uv_hash
         geo_same = cached and cached.get('geo_hash') == current_geo_hash
-        if uv_same and geo_same:
+        geo_dirty = cached.get('_geo_dirty', False) if cached else False
+        utils.log("debug_hash", f"{obj.name}: uv_same={uv_same} geo_same={geo_same} dirty={geo_dirty} cur_geo={current_geo_hash} cached_geo={cached.get('geo_hash') if cached else 'N/A'}")
+        if uv_same and geo_same and not geo_dirty:
             utils.log("id_cache", f"{obj.name}: hit (uv={current_uv_hash}, geo={current_geo_hash})")
+            return (current_uv_hash, current_geo_hash), None, None, None, None, None
+        if uv_same and geo_same and geo_dirty:
+            # False alarm: depsgraph reported geometry changed but hash is identical.
+            # Clear dirty flag and skip expensive island extraction.
+            cached['_geo_dirty'] = False
+            utils.log("id_cache", f"{obj.name}: false alarm — hash unchanged, clearing dirty")
             return (current_uv_hash, current_geo_hash), None, None, None, None, None
 
         obj_seed = utils.get_string_hash(obj.name)
         islands  = ix.extract_islands(
-            bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name, obj.matrix_world
+            bm_copy, uv_layer, uv_id_alpha, obj_seed, utils, obj.name, obj.matrix_world, eval_verts
         )
         
         _t_extract = time.perf_counter()
@@ -291,9 +306,17 @@ def _serialize_islands_for_worker(tiled):
     for name, cache in _obj_cache.items():
         islands = cache.get('islands') or []
         prev_self = _isect_self_cache.get(name, {})
-        cur_hash = cache.get('hash')
+        cur_hash = (cache.get('hash'), cache.get('geo_hash'))
 
-        if pkg and pkg.get_synced_hash(name) == cur_hash:
+        synced = pkg.get_synced_hash(name) if pkg else None
+        
+        clear_stretch = False
+        if type(synced) is tuple and len(synced) == 2:
+            clear_stretch = (synced[1] != cur_hash[1])
+        else:
+            clear_stretch = True
+
+        if synced == cur_hash:
             ser_islands = None
         else:
             ser_islands = []
@@ -313,21 +336,23 @@ def _serialize_islands_for_worker(tiled):
                     'color':        isle.color,
                     'object_name':  isle.object_name,
                     'uv_key':       isle.uv_key,
+                    'geo_key':      getattr(isle, 'geo_key', None),
                     'local_key':    isle.local_key,
                     'ref_a':        isle.ref_a,
                     'ref_b':        isle.ref_b,
-                    'jacobians':    isle.jacobians,
+                    'jacobians':    getattr(isle, 'jacobians', []),
                     'uv_area':      isle.uv_area,
                     'surface_area': isle.surface_area,
                     'aabb':         isle.aabb,
                 })
-            if pkg:
-                pkg.mark_synced(name, cur_hash)
+
+        utils.log("debug_ipc", f"{name}: synced={synced is not None} cur_geo={cur_hash[1]} synced_geo={synced[1] if type(synced) is tuple and len(synced)==2 else 'N/A'} clear_stretch={clear_stretch} sending_islands={ser_islands is not None}")
 
         objects.append({
             'name':      name,
             'hash':      cur_hash,
             'islands':   ser_islands,
+            'clear_stretch': clear_stretch,
             'prev_self': {
                 'inter_idx':   prev_self.get('inter_idx'),
                 'stack_idx':   prev_self.get('stack_idx'),
@@ -389,6 +414,8 @@ def _dispatch_worker_job(props):
         _classify_job_id = job_id
     if do_stretch:
         _stretch_job_id = job_id
+        
+    _job_hashes_sent[job_id] = {obj['name']: obj['hash'] for obj in objects}
 
     ok = pkg.send_job({
         'id':          job_id,
@@ -415,7 +442,7 @@ def _start_result_poller():
         return  # already running
 
     def _poll():
-        global _result_timer_fn, _classify_job_id, _stretch_job_id, _busy_frame
+        global _result_timer_fn, _classify_job_id, _stretch_job_id, _busy_frame, _pending_dispatch_count
         import sys as _sys
         pkg = _sys.modules.get(__package__)
         if pkg is None:
@@ -427,6 +454,7 @@ def _start_result_poller():
             _classify_job_id = 0
             _stretch_job_id = 0
             _result_timer_fn = None
+            _pending_dispatch_count = 0
             _tag_redraw()
             return None
 
@@ -456,6 +484,7 @@ def _start_result_poller():
                     _apply_worker_result(result)
                 else:
                     utils.log("async", f"discarding obsolete result job_id={rid}")
+                    _job_hashes_sent.pop(rid, None)
             else:
                 utils.log("async", f"discarding stale/unknown result type={rtype} id={rid}")
 
@@ -474,10 +503,14 @@ def _start_result_poller():
 
         _result_timer_fn = None
         
-        global _pending_dispatch
-        if _pending_dispatch:
-            _pending_dispatch = False
-            _schedule_debounce()
+        if _pending_dispatch_count > 0:
+            _pending_dispatch_count = 0
+            def _fire_now():
+                if not is_calculating:
+                    update_batches_safe(bpy.context)
+                    _tag_redraw()
+                return None
+            bpy.app.timers.register(_fire_now)
             
         return None
 
@@ -486,7 +519,7 @@ def _start_result_poller():
 
 
 def _cancel_result_poller():
-    global _result_timer_fn, _classify_job_id, _stretch_job_id
+    global _result_timer_fn, _classify_job_id, _stretch_job_id, _pending_dispatch_count, _job_hashes_sent
     if _result_timer_fn is not None:
         try:
             bpy.app.timers.unregister(_result_timer_fn)
@@ -495,6 +528,8 @@ def _cancel_result_poller():
         _result_timer_fn = None
     _classify_job_id = 0
     _stretch_job_id = 0
+    _pending_dispatch_count = 0
+    _job_hashes_sent.clear()
 
 
 def is_worker_busy():
@@ -518,6 +553,14 @@ def _tag_redraw():
 def _apply_worker_result(result):
     """Apply a compute_result from the worker (classify and/or stretch)."""
     job_id = result.get('id')
+    
+    import sys
+    pkg = sys.modules.get(__package__)
+    if pkg:
+        hashes = _job_hashes_sent.pop(job_id, {})
+        for name, h in hashes.items():
+            pkg.mark_synced(name, h)
+            utils.log("debug_sync", f"mark_synced '{name}' geo_hash={h[1] if type(h) is tuple and len(h)==2 else h}")
     
     import time
     start_time = _job_start_times.pop(job_id, None)
@@ -949,11 +992,14 @@ def update_batches_safe(context):
 
     try:
         props        = context.scene.uv_id_props
+        props_3d     = context.scene.uv_3d_seam_props
         uv_id_mode   = props.overlay_mode
         uv_id_alpha  = props.opacity
         any_changed  = False
         active_names = set()
 
+        from . import draw_3d
+        stretch_3d_active = draw_3d.any_viewport_stretch_active() and not props_3d.is_muted
 
         edit_objs = sorted(
             [o for o in context.scene.objects
@@ -984,11 +1030,24 @@ def update_batches_safe(context):
         for obj_index, obj in enumerate(edit_objs):
             active_names.add(obj.name)
 
+            eval_verts = None
+            if stretch_3d_active:
+                try:
+                    depsgraph = context.evaluated_depsgraph_get()
+                    obj_eval = obj.evaluated_get(depsgraph)
+                    mesh = obj_eval.data
+                    eval_verts = np.empty((len(mesh.vertices) * 3,), dtype=np.float32)
+                    mesh.vertices.foreach_get('co', eval_verts)
+                    eval_verts = eval_verts.reshape(-1, 3)
+                except Exception:
+                    eval_verts = None
+
             new_hashes, new_id_batch, new_islands, new_id_coords, new_id_rgba, new_face_count = _build_obj_data(
                 obj, uv_id_mode, uv_id_alpha, obj_index, total_objs,
                 group_offset=group_offsets.get(obj.name, 0),
                 total_global_groups=total_global_groups,
                 precomputed_groups=precomp_groups.get(obj.name),
+                eval_verts=eval_verts
             )
 
             if new_hashes:
@@ -1013,6 +1072,12 @@ def update_batches_safe(context):
                 any_changed = True
             elif new_uv_hash is not None and obj.name not in _obj_cache:
                 any_changed = True
+            else:
+                # Check if worker is out of sync (e.g., after Undo reverted to a cached state)
+                import sys
+                pkg = sys.modules.get(__package__)
+                if pkg and pkg.get_synced_hash(obj.name) != (new_uv_hash, new_geo_hash):
+                    any_changed = True
 
         for name in list(_obj_cache):
             if name not in active_names:
@@ -1026,22 +1091,20 @@ def update_batches_safe(context):
         stretch.clear_stale(active_names)
 
 
-        props_3d = context.scene.uv_3d_seam_props
-        from . import draw_3d
-        stretch_3d_active = draw_3d.any_viewport_stretch_active() and not props_3d.is_muted
-
         needs_classify = props.show_intersect and not props.is_muted and (
             any_changed or (_intersect_batches['hatch'] is None and _result_timer_fn is None))
         
-        needs_stretch = ((props.show_stretch and not props.is_muted) or stretch_3d_active) and (
-            any_changed or stretch._geo_batch is None) # We'll need a better check for 3D batch later
+        needs_2d = (props.show_stretch and not props.is_muted) and (any_changed or stretch._geo_batch is None)
+        needs_3d = stretch_3d_active and (any_changed or not stretch.has_valid_3d_batches(active_names))
+        needs_stretch = needs_2d or needs_3d
+        utils.log("debug_dispatch", f"any_changed={any_changed} needs_2d={needs_2d} needs_3d={needs_3d} valid_3d={stretch.has_valid_3d_batches(active_names) if stretch_3d_active else 'N/A'}")
 
         if needs_classify or needs_stretch:
             # Skip if worker already busy; poller will trigger redraw on completion.
             if _result_timer_fn is not None:
                 utils.log("async", "skipping dispatch — worker already busy")
-                global _pending_dispatch
-                _pending_dispatch = True
+                global _pending_dispatch_count
+                _pending_dispatch_count += 1
             elif not _dispatch_worker_job(props):
                 # Sync fallback
                 if needs_classify:
@@ -1125,14 +1188,34 @@ def depsgraph_update_handler(scene, depsgraph):
                 force_rebuild = True
                 break
                 
-    geometry_changed = any(u.is_updated_geometry and isinstance(u.id, bpy.types.Mesh) for u in depsgraph.updates)
+    geometry_changed = False
+    _changed_mesh_data_names = set()
+    for u in depsgraph.updates:
+        if u.is_updated_geometry:
+            if isinstance(u.id, bpy.types.Mesh):
+                geometry_changed = True
+                _changed_mesh_data_names.add(u.id.name)
+            elif isinstance(u.id, bpy.types.Object) and u.id.type == 'MESH':
+                geometry_changed = True
+                if u.id.data:
+                    _changed_mesh_data_names.add(u.id.data.name)
 
     if geometry_changed and stretch_3d_active:
         stretch.fast_update_3d_positions(bpy.context)
 
+    if geometry_changed:
+        # Mark only objects whose mesh actually changed as dirty.
+        # Use a dirty flag instead of popping geo_hash so that
+        # _build_obj_data can detect false alarms (depsgraph fired
+        # but vertex positions didn't actually change).
+        for name, cache in _obj_cache.items():
+            obj = bpy.data.objects.get(name)
+            if obj and obj.data and obj.data.name in _changed_mesh_data_names:
+                cache['_geo_dirty'] = True
+                utils.log("debug_trigger", f"geo_dirty set for '{name}'")
+
     if not force_rebuild and not geometry_changed:
         return
-        
 
     def _do_rebuild():
         if not is_calculating:

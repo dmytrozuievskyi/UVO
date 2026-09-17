@@ -13,7 +13,7 @@ UV_DECIMAL = 3
 
 
 class Island:
-    __slots__ = ('tris', 'aabb', 'uv_key', 'local_key', 'ref_a', 'ref_b', 'color', 'object_name',
+    __slots__ = ('tris', 'aabb', 'uv_key', 'geo_key', 'local_key', 'ref_a', 'ref_b', 'color', 'object_name',
                  'boundary_segs', 'tri_centers', 'jacobians', 'uv_area', 'surface_area', 'world_tris', 'face_indices', 'vert_indices', 'hide_flags')
 
     def __init__(self, tris, color, object_name=''):
@@ -21,6 +21,7 @@ class Island:
         self.color         = color
         self.object_name   = object_name
         self.uv_key        = None
+        self.geo_key       = None
         self.local_key     = None
         self.ref_a         = (0.0, 0.0)
         self.ref_b         = (0.0, 0.0)
@@ -101,7 +102,7 @@ def _extract_boundary_segs(island_faces, face_index_set, uv_layer, uv_adj):
 
 
 def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
-                    object_name='', matrix_world=None):
+                    object_name='', matrix_world=None, eval_verts=None):
     t0 = time.perf_counter()
     bm_copy.faces.ensure_lookup_table()
     uv_adj = _build_uv_adjacency(bm_copy, uv_layer)
@@ -148,7 +149,7 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
         island_faces = [bm_copy.faces[i] for i in face_index_set]
         
         ta = time.perf_counter()
-        tris, world_tris, vert_indices, hide_flags, jacobians, uv_area, surf_area = _fan_tris_and_data(island_faces, uv_layer, matrix_world)
+        tris, world_tris, vert_indices, hide_flags, jacobians, uv_area, surf_area = _fan_tris_and_data(island_faces, uv_layer, matrix_world, eval_verts)
         tb = time.perf_counter()
         t_fan += (tb - ta)
 
@@ -165,6 +166,9 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
             tc = time.perf_counter()
             uv_key = _island_uv_key(island_faces, uv_layer)
             isle.uv_key = uv_key
+            
+            geo_key = _island_geo_key(island_faces)
+            isle.geo_key = geo_key
             
             isle.local_key = (len(tris), round(surf_area, 5), len(uv_key), round(uv_area, 5))
             ref_a = tris[0][0] if tris else (0.0, 0.0)
@@ -194,18 +198,31 @@ def extract_islands(bm_copy, uv_layer, alpha_val, obj_seed, utils_mod,
     return islands
 
 
-def _emit_triangle(l0, l1, l2, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j):
+import mathutils
+
+def _emit_triangle(l0, l1, l2, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts=None):
     uv0 = l0[uv_layer].uv
     uv1 = l1[uv_layer].uv
     uv2 = l2[uv_layer].uv
-    if has_matrix:
-        p0 = matrix_world @ l0.vert.co
-        p1 = matrix_world @ l1.vert.co
-        p2 = matrix_world @ l2.vert.co
+    
+    if eval_verts is not None:
+        def get_co(l):
+            idx = l.vert.index
+            if idx < len(eval_verts):
+                return mathutils.Vector(eval_verts[idx])
+            return l.vert.co
+        c0, c1, c2 = get_co(l0), get_co(l1), get_co(l2)
     else:
-        p0 = l0.vert.co
-        p1 = l1.vert.co
-        p2 = l2.vert.co
+        c0, c1, c2 = l0.vert.co, l1.vert.co, l2.vert.co
+
+    if has_matrix:
+        p0 = matrix_world @ c0
+        p1 = matrix_world @ c1
+        p2 = matrix_world @ c2
+    else:
+        p0 = c0
+        p1 = c1
+        p2 = c2
 
     tris.append(((uv0.x, uv0.y), (uv1.x, uv1.y), (uv2.x, uv2.y)))
     world_tris.append(((p0.x, p0.y, p0.z), 
@@ -275,7 +292,7 @@ def _point_in_triangle_uv(p, a, b, c):
 
     return (u >= -1e-5) and (v >= -1e-5) and (w >= -1e-5)
 
-def _earclip_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j):
+def _earclip_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts=None):
     n = len(loops)
     verts = [(loops[i], loops[i][uv_layer].uv) for i in range(n)]
     indices = list(range(n))
@@ -319,7 +336,7 @@ def _earclip_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tri
             if is_ear:
                 uv_a, surf_a = _emit_triangle(verts[idx_prev][0], verts[idx_curr][0], verts[idx_next][0], 
                                                     uv_layer, matrix_world, has_matrix, is_hidden, 
-                                                    tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+                                                    tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts)
                 total_uv += uv_a
                 total_surf += surf_a
                 indices.pop(i)
@@ -332,14 +349,14 @@ def _earclip_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tri
                 l1 = verts[indices[i]][0]
                 l2 = verts[indices[i + 1]][0]
                 uv_a, surf_a = _emit_triangle(l0, l1, l2, uv_layer, matrix_world, has_matrix, is_hidden, 
-                                              tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+                                              tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts)
                 total_uv += uv_a
                 total_surf += surf_a
             break
             
     return total_uv, total_surf
 
-def _fan_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j):
+def _fan_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts=None):
     l0 = loops[0]
     total_uv = 0.0
     total_surf = 0.0
@@ -347,12 +364,12 @@ def _fan_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, tris, w
         l1 = loops[i]
         l2 = loops[i + 1]
         uv_a, surf_a = _emit_triangle(l0, l1, l2, uv_layer, matrix_world, has_matrix, is_hidden, 
-                                      tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+                                      tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts)
         total_uv += uv_a
         total_surf += surf_a
     return total_uv, total_surf
 
-def _fan_tris_and_data(faces, uv_layer, matrix_world):
+def _fan_tris_and_data(faces, uv_layer, matrix_world, eval_verts=None):
     tris = []
     world_tris = []
     vert_indices = []
@@ -374,10 +391,10 @@ def _fan_tris_and_data(faces, uv_layer, matrix_world):
         
         if n <= 3:
             uv_a, surf_a = _fan_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, 
-                                          tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+                                          tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts)
         else:
             uv_a, surf_a = _earclip_decompose(loops, uv_layer, matrix_world, has_matrix, is_hidden, 
-                                              tris, world_tris, vert_indices, hide_flags, jacobians, identity_j)
+                                              tris, world_tris, vert_indices, hide_flags, jacobians, identity_j, eval_verts)
         
         total_uv_area += uv_a
         total_surf_area += surf_a
@@ -393,6 +410,17 @@ def _island_uv_key(faces, uv_layer):
             v = round(loop[uv_layer].uv.y, UV_DECIMAL)
             uvs.add((u, v))
     return frozenset(uvs)
+
+import struct
+
+def _island_geo_key(faces):
+    co = set()
+    _pack = struct.pack
+    for face in faces:
+        for loop in face.loops:
+            c = loop.vert.co
+            co.add(_pack('3d', c.x, c.y, c.z))
+    return frozenset(co)
 
 
 def _aabb_overlap(a, b):

@@ -211,6 +211,18 @@ def clear_stale(active_names):
         if name not in active_names:
             del _stretch_3d_cache[name]
 
+def has_valid_3d_batches(active_names):
+    if not _stretch_3d_cache: return False
+    for name in active_names:
+        if name not in _stretch_3d_cache: return False
+        cache = _stretch_3d_cache[name]
+        # Check if stretch DATA exists, not the GPU batch.
+        # The GPU batch is lazily rebuilt on draw; batch=None is normal
+        # during interactive editing after fast_update_3d_positions.
+        if not cache.get('heatmap_colors') and not cache.get('checker_colors'):
+            return False
+    return True
+
 def rebuild_from_worker_data(results, obj_cache, context):
     from . import stretch_checker
     from . import stretch_heatmap

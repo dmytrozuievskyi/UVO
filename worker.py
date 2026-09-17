@@ -78,6 +78,7 @@ def _deserialize_island(d, ix):
     isle               = ix.Island(tris, d['color'], d['object_name'])
     isle.boundary_segs = boundary_segs
     isle.uv_key        = d['uv_key']
+    isle.geo_key       = d.get('geo_key')
     isle.local_key     = d.get('local_key')
     isle.ref_a         = d.get('ref_a', (0.0, 0.0))
     isle.ref_b         = d.get('ref_b', (0.0, 0.0))
@@ -233,6 +234,13 @@ def _run_stretch(objects, job_id):
         if not islands:
             continue
 
+        if obj.get('clear_stretch', False):
+            _stretch_cache.pop(name, None)
+            _stretch_local_cache.pop(name, None)
+            _wlog(f"job {job_id}: CLEARED stretch cache for '{name}'")
+        else:
+            _wlog(f"job {job_id}: clear_stretch=False for '{name}', keeping cache ({len(_stretch_cache.get(name,[]))} entries)")
+
         prev_by_key = {ck: res for ck, res in _stretch_cache.get(name, [])}
         local_prev_by_key = _stretch_local_cache.get(name, {})
 
@@ -244,7 +252,8 @@ def _run_stretch(objects, job_id):
         all_heatmap_colors   = []
 
         for isle in islands:
-            cache_key       = (isle.uv_key, tex_w, tex_h, target_tx)
+            geo = isle.geo_key if getattr(isle, 'geo_key', None) is not None else isle.local_key
+            cache_key       = (isle.uv_key, geo, tex_w, tex_h, target_tx)
             local_cache_key = (isle.local_key, tex_w, tex_h, target_tx)
             
             cached_result = prev_by_key.get(cache_key)
@@ -387,6 +396,7 @@ def _handle_compute(job, ix):
             'tex_w':       od.get('tex_w'),
             'tex_h':       od.get('tex_h'),
             'target_texel': od.get('target_texel'),
+            'clear_stretch': od.get('clear_stretch', False),
         })
 
     _wlog(f"job {job_id}: sync done {(time.perf_counter()-t0)*1000:.0f}ms "
