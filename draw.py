@@ -48,7 +48,7 @@ _PREPASS_FAILED = object()  # sentinel: pre-pass failed, use n=1 fallback
 
 _DEBOUNCE_DELAY = 0.25
 _debounce_fn    = None
-_pending_dispatch_count = 0
+_pending_dispatch = False
 _job_hashes_sent = {}
 
 
@@ -442,7 +442,7 @@ def _start_result_poller():
         return  # already running
 
     def _poll():
-        global _result_timer_fn, _classify_job_id, _stretch_job_id, _busy_frame, _pending_dispatch_count
+        global _result_timer_fn, _classify_job_id, _stretch_job_id, _busy_frame, _pending_dispatch
         import sys as _sys
         pkg = _sys.modules.get(__package__)
         if pkg is None:
@@ -454,7 +454,7 @@ def _start_result_poller():
             _classify_job_id = 0
             _stretch_job_id = 0
             _result_timer_fn = None
-            _pending_dispatch_count = 0
+            _pending_dispatch = False
             _tag_redraw()
             return None
 
@@ -503,8 +503,8 @@ def _start_result_poller():
 
         _result_timer_fn = None
         
-        if _pending_dispatch_count > 0:
-            _pending_dispatch_count = 0
+        if _pending_dispatch:
+            _pending_dispatch = False
             def _fire_now():
                 if not is_calculating:
                     update_batches_safe(bpy.context)
@@ -519,7 +519,7 @@ def _start_result_poller():
 
 
 def _cancel_result_poller():
-    global _result_timer_fn, _classify_job_id, _stretch_job_id, _pending_dispatch_count, _job_hashes_sent
+    global _result_timer_fn, _classify_job_id, _stretch_job_id, _pending_dispatch, _job_hashes_sent
     if _result_timer_fn is not None:
         try:
             bpy.app.timers.unregister(_result_timer_fn)
@@ -528,7 +528,7 @@ def _cancel_result_poller():
         _result_timer_fn = None
     _classify_job_id = 0
     _stretch_job_id = 0
-    _pending_dispatch_count = 0
+    _pending_dispatch = False
     _job_hashes_sent.clear()
 
 
@@ -1103,8 +1103,8 @@ def update_batches_safe(context):
             # Skip if worker already busy; poller will trigger redraw on completion.
             if _result_timer_fn is not None:
                 utils.log("async", "skipping dispatch — worker already busy")
-                global _pending_dispatch_count
-                _pending_dispatch_count += 1
+                global _pending_dispatch
+                _pending_dispatch = True
             elif not _dispatch_worker_job(props):
                 # Sync fallback
                 if needs_classify:
