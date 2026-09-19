@@ -363,14 +363,17 @@ def draw(props, shader, context):
             stretch_checker.draw(_geo_batch, opacity, context, use_tint=True)
 
 
+def clear_2d():
+    global _geo_batch, _heatmap_batch
+    _geo_batch = None
+    _heatmap_batch = None
+
 def clear():
     """Release GPU resources. Called on unregister."""
     from . import stretch_checker
     from . import stretch_heatmap
 
-    global _geo_batch, _heatmap_batch
-    _geo_batch = None
-    _heatmap_batch = None
+    clear_2d()
     stretch_checker.clear()
     stretch_heatmap.clear()
     clear_3d()

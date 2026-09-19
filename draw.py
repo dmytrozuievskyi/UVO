@@ -1121,8 +1121,7 @@ def update_batches_safe(context):
             
         if not (props.show_stretch and not props.is_muted):
             # Only clear 2D batches if 2D is off
-            stretch._geo_batch = None
-            stretch._heatmap_batch = None
+            stretch.clear_2d()
             
         if not stretch_3d_active:
             stretch.clear_3d()
