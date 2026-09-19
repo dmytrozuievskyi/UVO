@@ -1204,10 +1204,8 @@ def depsgraph_update_handler(scene, depsgraph):
         stretch.fast_update_3d_positions(bpy.context)
 
     if geometry_changed:
-        # Mark only objects whose mesh actually changed as dirty.
-        # Use a dirty flag instead of popping geo_hash so that
-        # _build_obj_data can detect false alarms (depsgraph fired
-        # but vertex positions didn't actually change).
+        # Flag changed meshes as dirty instead of clearing hash immediately,
+        # allowing _build_obj_data to catch false alarms from depsgraph.
         for name, cache in _obj_cache.items():
             obj = bpy.data.objects.get(name)
             if obj and obj.data and obj.data.name in _changed_mesh_data_names:
