@@ -202,7 +202,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
         uv_same = cached and cached.get('hash') == current_uv_hash
         geo_same = cached and cached.get('geo_hash') == current_geo_hash
         geo_dirty = cached.get('_geo_dirty', False) if cached else False
-        utils.log("debug_hash", f"{obj.name}: uv_same={uv_same} geo_same={geo_same} dirty={geo_dirty} cur_geo={current_geo_hash} cached_geo={cached.get('geo_hash') if cached else 'N/A'}")
+        utils.log("id_cache", f"{obj.name}: uv_same={uv_same} geo_same={geo_same} dirty={geo_dirty} cur_geo={current_geo_hash} cached_geo={cached.get('geo_hash') if cached else 'N/A'}")
         if uv_same and geo_same and not geo_dirty:
             utils.log("id_cache", f"{obj.name}: hit (uv={current_uv_hash}, geo={current_geo_hash})")
             return (current_uv_hash, current_geo_hash), None, None, None, None, None
@@ -346,7 +346,7 @@ def _serialize_islands_for_worker(tiled):
                     'aabb':         isle.aabb,
                 })
 
-        utils.log("debug_ipc", f"{name}: synced={synced is not None} cur_geo={cur_hash[1]} synced_geo={synced[1] if type(synced) is tuple and len(synced)==2 else 'N/A'} clear_stretch={clear_stretch} sending_islands={ser_islands is not None}")
+        utils.log("async", f"ipc: {name} synced={synced is not None} cur_geo={cur_hash[1]} synced_geo={synced[1] if type(synced) is tuple and len(synced)==2 else 'N/A'} clear_stretch={clear_stretch} sending_islands={ser_islands is not None}")
 
         objects.append({
             'name':      name,
@@ -560,7 +560,7 @@ def _apply_worker_result(result):
         hashes = _job_hashes_sent.pop(job_id, {})
         for name, h in hashes.items():
             pkg.mark_synced(name, h)
-            utils.log("debug_sync", f"mark_synced '{name}' geo_hash={h[1] if type(h) is tuple and len(h)==2 else h}")
+            utils.log("async", f"mark_synced '{name}' geo_hash={h[1] if type(h) is tuple and len(h)==2 else h}")
     
     import time
     start_time = _job_start_times.pop(job_id, None)
@@ -1097,7 +1097,7 @@ def update_batches_safe(context):
         needs_2d = (props.show_stretch and not props.is_muted) and (any_changed or stretch._geo_batch is None)
         needs_3d = stretch_3d_active and (any_changed or not stretch.has_valid_3d_batches(active_names))
         needs_stretch = needs_2d or needs_3d
-        utils.log("debug_dispatch", f"any_changed={any_changed} needs_2d={needs_2d} needs_3d={needs_3d} valid_3d={stretch.has_valid_3d_batches(active_names) if stretch_3d_active else 'N/A'}")
+        utils.log("async", f"dispatch: any_changed={any_changed} needs_2d={needs_2d} needs_3d={needs_3d} valid_3d={stretch.has_valid_3d_batches(active_names) if stretch_3d_active else 'N/A'}")
 
         if needs_classify or needs_stretch:
             # Skip if worker already busy; poller will trigger redraw on completion.
@@ -1212,7 +1212,7 @@ def depsgraph_update_handler(scene, depsgraph):
             obj = bpy.data.objects.get(name)
             if obj and obj.data and obj.data.name in _changed_mesh_data_names:
                 cache['_geo_dirty'] = True
-                utils.log("debug_trigger", f"geo_dirty set for '{name}'")
+                utils.log("async", f"geo_dirty set for '{name}'")
 
     if not force_rebuild and not geometry_changed:
         return

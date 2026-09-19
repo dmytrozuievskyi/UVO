@@ -2,6 +2,7 @@ import bpy
 import bmesh
 import gpu
 from gpu_extras.batch import batch_for_shader
+from . import utils
 
 # Module-level state
 _viewport_states = {}   # {space_ptr: ViewportState}
@@ -299,7 +300,7 @@ def _safe_update_seam_data(context, reason="unknown", changed_meshes=None):
                 obj_ms = (t_obj_end - t_obj_start) * 1000
                 total_work_ms += obj_ms
                 obj_count += 1
-                print(f"[UVO] seams_3d ({reason}) '{obj.name}': copy={(t_copy_end - t_copy_start)*1000:.1f}ms, extract={(t_extract_end - t_extract_start)*1000:.1f}ms, total={obj_ms:.1f}ms ({segs} segs)")
+                utils.log("timing_build", f"seams_3d ({reason}) '{obj.name}': copy={(t_copy_end - t_copy_start)*1000:.1f}ms, extract={(t_extract_end - t_extract_start)*1000:.1f}ms, total={obj_ms:.1f}ms ({segs} segs)")
             except Exception:
                 pass
             finally:
@@ -307,7 +308,7 @@ def _safe_update_seam_data(context, reason="unknown", changed_meshes=None):
                     bm_copy.free()
                     
         if obj_count > 0:
-            print(f"[UVO] seams_3d ({reason}) Done: {obj_count} obj(s), {total_segments} segs, work={total_work_ms:.1f}ms")
+            utils.log("timing_build", f"seams_3d ({reason}) Done: {obj_count} obj(s), {total_segments} segs, work={total_work_ms:.1f}ms")
     finally:
         _is_extracting = False
 
