@@ -371,7 +371,7 @@ def draw_callback_3d():
     style = prefs.seams_3d_style
     
     # Get the appropriate shader
-    shader = _get_3d_shader(style)
+    shader = _get_shader()
     if shader is None:
         return
     
@@ -499,8 +499,8 @@ void main() {
 """)
     return gpu.shader.create_from_info(info)
 
-def _get_3d_shader(style):
-    """Return the appropriate shader for the requested line style."""
+def _get_shader():
+    """Return the cached 3D shader."""
     global _shader_solid
     
     if _shader_solid is None:

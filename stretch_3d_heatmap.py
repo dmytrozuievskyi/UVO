@@ -31,7 +31,7 @@ void main()
 }
 """
 
-def get_shader():
+def _get_shader():
     global _shader
     if _shader is None:
         info = gpu.types.GPUShaderCreateInfo()
@@ -52,7 +52,7 @@ def get_shader():
 
 def draw(stretch_3d_cache, opacity):
     import bpy
-    shader = get_shader()
+    shader = _get_shader()
     shader.bind()
     shader.uniform_float("opacity", opacity)
 
