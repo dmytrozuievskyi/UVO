@@ -17,7 +17,7 @@ import math
 import time
 import traceback
 
-from . import intersect as ix
+from . import intersect
 from . import stretch
 
 # Redirect stdout to stderr so print() doesn't corrupt the IPC pipe.
@@ -63,7 +63,7 @@ def _write_result(stream, result):
 
 
 
-def _deserialize_island(d, ix):
+def _deserialize_island(d):
     """Reconstruct an intersect.Island from a serialized dict."""
     flat_tris = d['flat_tris']
     tris = [
@@ -75,7 +75,7 @@ def _deserialize_island(d, ix):
         ((fs[0], fs[1]), (fs[2], fs[3]))
         for fs in flat_segs
     ]
-    isle               = ix.Island(tris, d['color'], d['object_name'])
+    isle               = intersect.Island(tris, d['color'], d['object_name'])
     isle.boundary_segs = boundary_segs
     isle.uv_key        = d['uv_key']
     isle.geo_key       = d.get('geo_key')
@@ -97,7 +97,7 @@ _stretch_cache     = {}  # {name: [(cache_key, result), ...]}  per-island stretc
 _stretch_local_cache = {}  # {name: {local_cache_key: {'ref_a': A, 'ref_b': B, 'result': ...}}}
 
 
-def _run_classify(objects, cross_prev, tiled, job_id, ix):
+def _run_classify(objects, cross_prev, tiled, job_id):
     """Run self + cross classify for all objects. Returns (self_results, cross_results)."""
     self_results = {}
     for obj in objects:
@@ -106,7 +106,7 @@ def _run_classify(objects, cross_prev, tiled, job_id, ix):
         _wlog(f"job {job_id}: SELF '{name}' ({len(obj['det_islands'])} islands)")
         t1 = time.perf_counter()
 
-        inter_idx, stack_idx, uv_kh, i_pairs, ikeys, pcache = ix.classify_islands(
+        inter_idx, stack_idx, uv_kh, i_pairs, ikeys, pcache = intersect.classify_islands(
             obj['det_islands'],
             prev_inter_idx   = p.get('inter_idx'),
             prev_stack_idx   = p.get('stack_idx'),
@@ -140,7 +140,7 @@ def _run_classify(objects, cross_prev, tiled, job_id, ix):
             t2       = time.perf_counter()
 
             r_a, r_b, s_a, s_b, uv_h, i_pairs, ckeys_a, ckeys_b, cpcache = \
-                ix.classify_islands_cross(
+                intersect.classify_islands_cross(
                     oa['det_islands'], ob['det_islands'],
                     prev_inter_a       = p.get('inter_a'),
                     prev_inter_b       = p.get('inter_b'),
@@ -342,7 +342,7 @@ def _run_stretch(objects, job_id):
     return stretch_results
 
 
-def _handle_compute(job, ix):
+def _handle_compute(job):
     """Sync mesh cache (Delta-IPC), then run classify and/or stretch."""
     obj_data    = job.get('objects', [])
     job_id      = job.get('id', '?')
@@ -372,8 +372,8 @@ def _handle_compute(job, ix):
         h           = od['hash']
 
         if raw_islands is not None:
-            islands     = [_deserialize_island(d, ix) for d in raw_islands]
-            det_islands = [ix.normalize_island(i) for i in islands] if tiled else islands
+            islands     = [_deserialize_island(d) for d in raw_islands]
+            det_islands = [intersect.normalize_island(i) for i in islands] if tiled else islands
             _worker_mesh_cache[name] = {'hash': h, 'islands': islands,
                                         'det_islands': det_islands}
             _wlog(f"job {job_id}: synced '{name}' ({len(islands)} islands)")
@@ -406,7 +406,7 @@ def _handle_compute(job, ix):
 
     # Classify
     if do_classify:
-        self_r, cross_r = _run_classify(objects, cross_prev, tiled, job_id, ix)
+        self_r, cross_r = _run_classify(objects, cross_prev, tiled, job_id)
         result['self_results']  = self_r
         result['cross_results'] = cross_r
 
@@ -418,14 +418,14 @@ def _handle_compute(job, ix):
     return result
 
 
-def _process_job(job, ix):
+def _process_job(job):
     job_type = job.get('type')
 
     if job_type == 'ping':
         return {'id': job.get('id'), 'type': 'pong'}
 
     if job_type == 'compute':
-        return _handle_compute(job, ix)
+        return _handle_compute(job)
 
     return {'id': job.get('id'), 'type': 'error', 'msg': f'unknown: {job_type!r}'}
 
@@ -511,7 +511,7 @@ def main_loop(argv):
         error = None
 
         try:
-            result = _process_job(job, ix)
+            result = _process_job(job)
         except Exception as e:
             err_msg = str(e)
             tb = traceback.format_exc()
