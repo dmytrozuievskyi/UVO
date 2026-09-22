@@ -13,6 +13,7 @@ from . import intersect
 from . import offscreen
 from . import padding
 from . import stretch
+import sys
 
 draw_handler   = None
 is_calculating = False
@@ -87,8 +88,7 @@ def full_refresh(context):
     _hatch_seg_cache.clear()
     _cross_hatch_seg_cache.clear()
     
-    import sys as _sys
-    pkg = _sys.modules.get(__package__)
+    pkg = sys.modules.get(__package__)
     if pkg:
         pkg.clear_synced_objects()
         
@@ -296,8 +296,7 @@ def _build_obj_data(obj, uv_id_mode, uv_id_alpha,
 
 def _serialize_islands_for_worker(tiled):
     """Pack cached island data for the worker, bundling previous classify cache state."""
-    import sys as _sys
-    pkg = _sys.modules.get(__package__)
+    pkg = sys.modules.get(__package__)
 
     if pkg and hasattr(pkg, 'evict_stale_synced_objects'):
         pkg.evict_stale_synced_objects(set(_obj_cache.keys()))
@@ -384,8 +383,7 @@ def _serialize_islands_for_worker(tiled):
 def _dispatch_worker_job(props):
     """Sync island data (Delta-IPC) and dispatch a unified compute job to the worker."""
     global _classify_job_id, _stretch_job_id
-    import sys as _sys
-    pkg = _sys.modules.get(__package__)
+    pkg = sys.modules.get(__package__)
     if pkg is None:
         return False
 
@@ -427,7 +425,6 @@ def _dispatch_worker_job(props):
         'do_stretch':  do_stretch,
     })
     
-    import time
     _job_start_times[job_id] = time.time()
     
     utils.log("async", f"worker job dispatched id={job_id} ok={ok} "
@@ -443,8 +440,7 @@ def _start_result_poller():
 
     def _poll():
         global _result_timer_fn, _classify_job_id, _stretch_job_id, _busy_frame, _pending_dispatch
-        import sys as _sys
-        pkg = _sys.modules.get(__package__)
+        pkg = sys.modules.get(__package__)
         if pkg is None:
             _result_timer_fn = None
             return None
@@ -554,7 +550,6 @@ def _apply_worker_result(result):
     """Apply a compute_result from the worker (classify and/or stretch)."""
     job_id = result.get('id')
     
-    import sys
     pkg = sys.modules.get(__package__)
     if pkg:
         hashes = _job_hashes_sent.pop(job_id, {})
@@ -562,7 +557,6 @@ def _apply_worker_result(result):
             pkg.mark_synced(name, h)
             utils.log("async", f"mark_synced '{name}' geo_hash={h[1] if type(h) is tuple and len(h)==2 else h}")
     
-    import time
     start_time = _job_start_times.pop(job_id, None)
     if start_time is not None:
         duration = (time.time() - start_time) * 1000.0
@@ -1036,7 +1030,7 @@ def update_batches_safe(context):
                     depsgraph = context.evaluated_depsgraph_get()
                     obj_eval = obj.evaluated_get(depsgraph)
                     mesh = obj_eval.data
-                    eval_verts = np.empty((len(mesh.vertices) * 3,), dtype=np.float32)
+                    eval_verts = numpy.empty((len(mesh.vertices) * 3,), dtype=numpy.float32)
                     mesh.vertices.foreach_get('co', eval_verts)
                     eval_verts = eval_verts.reshape(-1, 3)
                 except Exception:
@@ -1074,7 +1068,6 @@ def update_batches_safe(context):
                 any_changed = True
             else:
                 # Check if worker is out of sync (e.g., after Undo reverted to a cached state)
-                import sys
                 pkg = sys.modules.get(__package__)
                 if pkg and pkg.get_synced_hash(obj.name) != (new_uv_hash, new_geo_hash):
                     any_changed = True

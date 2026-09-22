@@ -2,10 +2,7 @@ import time
 import math
 from collections import Counter as _Counter
 
-try:
-    from . import utils
-except ImportError:
-    import utils
+from . import utils
 
 EPSILON    = 1e-6
 UV_EPS     = 1e-4
@@ -412,6 +409,7 @@ def _island_uv_key(faces, uv_layer):
     return frozenset(uvs)
 
 import struct
+from . import utils
 
 def _island_geo_key(faces):
     co = set()

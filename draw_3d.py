@@ -12,6 +12,9 @@ _seam_cache = {}        # {obj_name: {coords_unsel, coords_sel, coords_act, batc
 
 
 from bpy.app.handlers import persistent
+import time
+import traceback
+from mathutils import Color
 
 @persistent
 def _depsgraph_update_handler_3d(scene, depsgraph):
@@ -254,7 +257,6 @@ def _safe_update_seam_data(context, reason="unknown", changed_meshes=None):
     _is_extracting = True
     
     try:
-        import time
         total_work_ms = 0.0
         total_segments = 0
         obj_count = 0
@@ -353,7 +355,6 @@ def draw_callback_3d():
             gpu.state.depth_mask_set(True)
             
     except Exception as e:
-        import traceback
         traceback.print_exc()
         gpu.state.depth_mask_set(True)
 
@@ -390,7 +391,6 @@ def draw_callback_3d():
         color_unsel = color
         
         # For selected, shift hue by 60 degrees
-        from mathutils import Color
         c_sel = Color((color_unsel[0], color_unsel[1], color_unsel[2]))
         h, s, v = c_sel.hsv
         c_sel.hsv = ((h + (60.0 / 360.0)) % 1.0, s, v)
@@ -457,7 +457,6 @@ def draw_callback_3d():
             draw_batch('seam_3d_coords_act', 'seam_3d_batch_act', color_act, 1.0, thickness)
     
     except Exception as e:
-        import traceback
         traceback.print_exc()
     finally:
         gpu.state.blend_set('NONE')

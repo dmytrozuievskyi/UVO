@@ -51,7 +51,6 @@ def _get_shader():
 
 
 def draw(stretch_3d_cache, opacity):
-    import bpy
     shader = _get_shader()
     shader.bind()
     shader.uniform_float("opacity", opacity)

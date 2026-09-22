@@ -1,5 +1,7 @@
 import bpy
 import math
+import bmesh
+from collections import defaultdict
 
 
 class UV_OT_ToggleOverlay(bpy.types.Operator):
@@ -84,7 +86,6 @@ class UV_OT_SampleStretchTexel(bpy.types.Operator):
 
         The maximum density across all sampled islands across all objects is returned.
         """
-        import bmesh
 
         edit_objs = [o for o in context.scene.objects if o.type == 'MESH' and o.mode == 'EDIT']
         if not edit_objs:
@@ -195,7 +196,6 @@ def _find_uv_islands(faces, uv_layer):
     islands    = []
 
     # Build a map: uv_coord_rounded → list of faces
-    from collections import defaultdict
     uv_to_faces = defaultdict(list)
     for face in faces:
         for loop in face.loops:
@@ -278,7 +278,6 @@ class VIEW3D_OT_select_uv_seams(bpy.types.Operator):
         return context.mode == 'EDIT_MESH'
         
     def execute(self, context):
-        import bmesh
         
         objects = context.objects_in_mode
         if not objects:

@@ -1,4 +1,5 @@
 import bpy
+import sys
 
 
 class IMAGE_PT_uv_id_overlay(bpy.types.Panel):
@@ -137,7 +138,6 @@ def draw_header_button(self, context):
     native_on = hasattr(space, 'overlay') and space.overlay.show_overlays
     is_active = (not props.is_muted) and native_on
 
-    import sys
     pkg   = sys.modules.get(__package__)
     pcoll = pkg.preview_collections.get("main") if pkg else None
 
@@ -312,7 +312,6 @@ def draw_3d_header_button(self, context):
     native_on = hasattr(context.space_data, 'overlay') and context.space_data.overlay.show_overlays
     is_active = (not props.is_muted) and native_on
     
-    import sys
     pkg   = sys.modules.get(__package__)
     pcoll = pkg.preview_collections.get("main") if pkg else None
     

@@ -1,4 +1,6 @@
 import math
+import bpy
+import numpy
 
 COL_BLUE = (0.0, 0.0, 1.0, 1.0)
 COL_GRAY = (0.214, 0.214, 0.214, 0.0)
@@ -300,8 +302,6 @@ def _rebuild_3d_cache(results, obj_cache):
 
 def fast_update_3d_positions(context):
     """Instantly updates the 3D overlay vertices during drag by reading eval_mesh."""
-    import bpy
-    import numpy as np
     
     if not _stretch_3d_cache: return
     
@@ -317,24 +317,24 @@ def fast_update_3d_positions(context):
         if not mesh.vertices: continue
         
         try:
-            verts = np.empty((len(mesh.vertices), 3), dtype=np.float32)
+            verts = numpy.empty((len(mesh.vertices), 3), dtype=numpy.float32)
             mesh.vertices.foreach_get('co', verts.ravel())
             
             # Update world_coords instantly using numpy advanced indexing
-            indices = np.array(cache['vert_indices'], dtype=np.int32)
-            if np.max(indices) >= len(verts): continue # topology changed wildly
+            indices = numpy.array(cache['vert_indices'], dtype=numpy.int32)
+            if numpy.max(indices) >= len(verts): continue # topology changed wildly
             
             # indices is (N, 3). We want a flat list of (3,) arrays for batch_for_shader
             flat_indices = indices.ravel()
             new_coords = verts[flat_indices]
             
             # Transform local coords to world space
-            mat = np.array(eval_obj.matrix_world, dtype=np.float32)
+            mat = numpy.array(eval_obj.matrix_world, dtype=numpy.float32)
             # new_coords is (M, 3). Extend to (M, 4) for matrix multiplication
-            ones = np.ones((new_coords.shape[0], 1), dtype=np.float32)
-            new_coords_4d = np.hstack([new_coords, ones])
+            ones = numpy.ones((new_coords.shape[0], 1), dtype=numpy.float32)
+            new_coords_4d = numpy.hstack([new_coords, ones])
             # Multiply (M, 4) x (4, 4)^T -> (M, 4)
-            world_coords_4d = np.dot(new_coords_4d, mat.T)
+            world_coords_4d = numpy.dot(new_coords_4d, mat.T)
             # Take x, y, z
             cache['world_coords'] = world_coords_4d[:, :3].tolist()
             

@@ -11,7 +11,6 @@ _ZOOM_DIVISIONS  = [10, 20, 40, 80, 160]
 def get_zoom(context):
     """Zoom factor relative to 256 px/UV unit, derived from projection matrix."""
     try:
-        import gpu
         matrix = gpu.matrix.get_projection_matrix()
         pixels_per_uv = abs(matrix[0][0]) * context.region.width * 0.5
         return max(0.01, pixels_per_uv / 256.0)
@@ -189,7 +188,6 @@ def draw(batch, opacity, context, use_tint=False):
         batch.draw(shader)
     except Exception as e:
         if not _draw_error_printed:
-            import traceback
             print(f"[UVO] stretch_checker draw error: {e}")
             traceback.print_exc()
             _draw_error_printed = True
