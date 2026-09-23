@@ -50,7 +50,7 @@ def _get_shader():
     return _shader
 
 
-def draw(stretch_3d_cache, opacity):
+def draw(stretch_3d_cache, opacity, context):
     shader = _get_shader()
     shader.bind()
     shader.uniform_float("opacity", opacity)
@@ -67,7 +67,7 @@ def draw(stretch_3d_cache, opacity):
                 {"pos": cache['world_coords'], "color": cache['heatmap_colors']}
             )
         
-        obj = bpy.data.objects.get(obj_name)
+        obj = context.scene.objects.get(obj_name)
         if obj:
             shader.uniform_float("ModelViewMatrix", base_mv)
             shader.uniform_float("ProjectionMatrix", base_proj)

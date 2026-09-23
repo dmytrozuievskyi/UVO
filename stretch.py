@@ -392,7 +392,7 @@ def draw_3d(props_3d, context):
     opacity = props_3d.stretch_3d_opacity
 
     if mode == 'HEATMAP':
-        stretch_3d_heatmap.draw(_stretch_3d_cache, opacity)
+        stretch_3d_heatmap.draw(_stretch_3d_cache, opacity, context)
     elif mode == 'CHECKER':
         stretch_3d_checker.draw(_stretch_3d_cache, opacity, context, use_tint=False)
     elif mode == 'BOTH':
